@@ -24,7 +24,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config",
         type=str,
-        default="configs/train_nerf.yaml",
+        required=True,
         help="Path to the training config",
     )
     args = parser.parse_args()

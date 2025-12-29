@@ -9,11 +9,10 @@ class NeRFLoss(nn.Module):
 
     def forward(self, inputs, targets):
         coarse_loss = compute_mse(inputs['rgb_coarse'], targets['rgbs'])
-        fine_loss = compute_mse(inputs['rgb_fine'], targets['rgbs'])
+        loss = {'coarse_loss': coarse_loss}
 
-        loss = {
-            'coarse_loss': coarse_loss,
-            'fine_loss': fine_loss
-        }
+        if 'rgb_fine' in inputs:
+            fine_loss = compute_mse(inputs['rgb_fine'], targets['rgbs'])
+            loss['fine_loss'] = fine_loss
 
         return loss

@@ -89,16 +89,10 @@ def render_rays(
         embeddings: [positional embedding, directional embedding].
         rays: tensor, shape (N_rays, 8), (o, d, near, far).
         N_samples: int, number of coarse samples.
-        use_disp: bool, sample in disparity space.
         perturb: float, perturb factor.
         noise_std: float, sigma noise std.
         N_importance: int, number of fine samples.
         white_back: bool, white background.
-
-    Returns:
-        dict with keys:
-            'rgb_coarse', 'depth_coarse', 'opacity_coarse',
-            optionally 'rgb_fine', 'depth_fine', 'opacity_fine'.
     """
     model_coarse = models['coarse']
     rays_o, rays_d = rays[:, :3], rays[:, 3:6]

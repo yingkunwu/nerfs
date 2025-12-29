@@ -2,6 +2,7 @@ expname: nerf++
 basedir: ./logs
 datadir: ./data/tanks_and_temples/Truck
 dataset: "tanks_and_temples"
+trainer: nerfplusplus
 
 # model
 model:

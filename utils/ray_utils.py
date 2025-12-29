@@ -231,25 +231,3 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
         (u - cdf_g[..., 0]) / denom
     ) * (bins_g[..., 1] - bins_g[..., 0])
     return samples
-
-
-def intersect_sphere(ray_o, ray_d):
-    '''
-    ray_o, ray_d: [..., 3]
-    compute the depth of the intersection point between this ray and unit
-    sphere: ||ray_o + (d * ray_d)||^2 = 1, where d = d1 + d2
-    '''
-    # note: d1 becomes negative if this mid point is behind camera
-    d1 = -torch.sum(ray_d * ray_o, dim=-1) / torch.sum(ray_d * ray_d, dim=-1)
-    p = ray_o + d1.unsqueeze(-1) * ray_d
-    p_norm_sq = torch.sum(p * p, dim=-1)
-    if (p_norm_sq >= 1.).any():
-        raise Exception('Not all your cameras are bounded by the unit sphere; '
-                        'please make sure the cameras are normalized!')
-    d2 = (
-        torch.sqrt(torch.sum(ray_d * ray_o, dim=-1) ** 2
-                   - torch.sum(ray_d * ray_d, dim=-1)
-                   * (torch.sum(ray_o * ray_o, dim=-1) - 1.))
-    ) / torch.sum(ray_d * ray_d, dim=-1)
-
-    return d1 + d2
