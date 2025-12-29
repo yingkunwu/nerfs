@@ -1,0 +1,33 @@
+expname: nerfw
+basedir: ./logs
+datadir: ./data/phototourism/brandenburg_gate
+dataset: "phototourism"
+
+# model
+model:
+  depth: 8
+  width: 256
+  xyz_embed_dim: 10  # for positional encoding
+  dir_embed_dim: 4  # for positional encoding
+  app_embed_dim: 48  # for appearance embedding
+  tra_embed_dim: 16  # for transient embedding
+  beta_min: 0.1  # to control the stability of beta
+  lambda_u: 0.01  # regularizer multiplier for loss
+  skips: [4]  # add skip connection in the Dth layer
+
+# Hyperparameters
+iters: 100000  # total training iterations
+lr: 5e-4
+momentum: 0.9
+weight_decay: 0.0
+scheduler:  # cosine annealing scheduler
+  min_learning_rate: 5e-5
+
+batch_size: 2048  # number of rays per batch
+chunk: 8192  # number of rays processed for inference
+N_samples: 64
+N_importance: 128
+perturb: 1.0
+noise_std: 0
+white_back: true  # use white background for rendering when using blender dataset
+gpu: 0

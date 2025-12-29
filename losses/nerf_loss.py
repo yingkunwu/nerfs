@@ -1,0 +1,19 @@
+from torch import nn
+
+from .base_loss import compute_mse
+
+
+class NeRFLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, inputs, targets):
+        coarse_loss = compute_mse(inputs['rgb_coarse'], targets['rgbs'])
+        fine_loss = compute_mse(inputs['rgb_fine'], targets['rgbs'])
+
+        loss = {
+            'coarse_loss': coarse_loss,
+            'fine_loss': fine_loss
+        }
+
+        return loss
