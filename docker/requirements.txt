@@ -1,0 +1,14 @@
+ninja
+tensorboard
+opencv-python
+matplotlib
+scikit-learn
+tqdm
+pyyaml
+einops
+thop
+timm
+trimesh
+open3d
+scipy
+omegaconf
