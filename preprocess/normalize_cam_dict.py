@@ -189,13 +189,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     os.makedirs(os.path.join(args.root_dir, 'posed_images'), exist_ok=True)
-    extract_all_to_dir(os.path.join(args.root_dir, 'sparse'),
+    extract_all_to_dir(os.path.join(args.root_dir, 'images_undistorted/sparse'),
                        os.path.join(args.root_dir, 'posed_images'))
-    undistorted_img_dir = os.path.join(args.root_dir, 'images')
-    posed_img_dir_link = os.path.join(args.root_dir, 'posed_images', 'images')
-    if os.path.exists(posed_img_dir_link):
-        os.remove(posed_img_dir_link)
-    os.symlink(undistorted_img_dir, posed_img_dir_link)
+    undistorted_img_dir = os.path.join(args.root_dir, 'images_undistorted/images')
 
     # normalize average camera center to origin, and put all cameras inside
     # the unit sphere
@@ -213,7 +209,7 @@ if __name__ == '__main__':
 
     # ==== Prepare output directories ====
     for subset in ["train", "val"]:
-        os.makedirs(os.path.join(save_dir, subset, "pose"), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, subset, "extrinsics"), exist_ok=True)
         os.makedirs(os.path.join(save_dir, subset, "intrinsics"), exist_ok=True)
         os.makedirs(os.path.join(save_dir, subset, "images"), exist_ok=True)
 
@@ -247,10 +243,10 @@ if __name__ == '__main__':
             W2C = entry["W2C"]
 
             intrinsic_path = os.path.join(save_dir, subset, "intrinsics", f"{base_name}.txt")
-            pose_path = os.path.join(save_dir, subset, "pose", f"{base_name}.txt")
+            extrinsic_path = os.path.join(save_dir, subset, "extrinsics", f"{base_name}.txt")
 
             save_matrix(K, intrinsic_path)
-            save_matrix(W2C, pose_path)
+            save_matrix(W2C, extrinsic_path)
 
             # copy image from img_root to the appropriate subset images folder
             src_img = os.path.join(undistorted_img_dir, key)

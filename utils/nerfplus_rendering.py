@@ -127,6 +127,8 @@ def inference(
         dim=-1
     )
     T = torch.cumprod(alphas_shifted, dim=-1)
+    # the probability the ray was not terminated by any foreground density
+    bg_lambda = T[..., -1].clone()
     fg_weights = alphas * T[:, :-1]
 
     # Background Volume rendering
@@ -149,8 +151,6 @@ def inference(
     bg_rgb = torch.sum(bg_weights[..., None] * bg_rgbs, dim=1)
     bg_depth = torch.sum(bg_weights * bg_z_vals, dim=1)
 
-    # the probability the ray was not terminated by any foreground density
-    bg_lambda = T[..., -1].clone()
     bg_rgb = bg_rgb * bg_lambda[:, None]
     bg_depth = bg_depth * bg_lambda
 
@@ -246,9 +246,7 @@ def render_rays(
             'fg_rgb_fine': result_fine['fg_rgb'],
             'fg_depth_fine': result_fine['fg_depth'],
             'bg_rgb_fine': result_fine['bg_rgb'],
-            'bg_depth_fine': result_fine['bg_depth'],
-            'fg_weights_fine': result_fine['fg_weights'],
-            'bg_weights_fine': result_fine['bg_weights']
+            'bg_depth_fine': result_fine['bg_depth']
         })
 
     return result

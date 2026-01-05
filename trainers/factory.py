@@ -41,14 +41,12 @@ class BaseTrainer(ABC):
 
         parameters = []
         for name, embed in self.embeddings.items():
-            embed_ = embed.to(self.device)
-            self.embeddings[name] = embed_
+            self.embeddings[name] = embed.to(self.device)
             if isinstance(embed, torch.nn.Embedding):
-                parameters += list(embed_.parameters())
+                parameters += list(self.embeddings[name].parameters())
         for name, model in self.models.items():
-            model_ = model.to(self.device)
-            self.models[name] = model_
-            parameters += list(model_.parameters())
+            self.models[name] = model.to(self.device)
+            parameters += list(self.models[name].parameters())
         self.optimizer = torch.optim.Adam(
             parameters, lr=cfg.lr, weight_decay=cfg.weight_decay
         )

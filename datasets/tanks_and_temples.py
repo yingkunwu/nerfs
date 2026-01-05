@@ -21,8 +21,8 @@ class TNTDataLoader(DataLoader):
             f'{root_dir}/{split}/images', exts=['*.png', '*.jpg'])
         self.intrinsics_files = self._find_files(
             f'{root_dir}/{split}/intrinsics', exts=['*.txt'])
-        self.pose_files = self._find_files(
-            f'{root_dir}/{split}/pose', exts=['*.txt'])
+        self.extrinsics_files = self._find_files(
+            f'{root_dir}/{split}/extrinsics', exts=['*.txt'])
 
         self.frames = range(len(self.img_files))
         self.count = 0
@@ -71,9 +71,9 @@ class TNTDataLoader(DataLoader):
             i = idx
 
         intrinsics = self._parse_txt(self.intrinsics_files[i])
-        pose = self._parse_txt(self.pose_files[i])
+        extrinsics = self._parse_txt(self.extrinsics_files[i])
         # w2c is the camera extrinsic matrix
-        w2c = torch.from_numpy(pose).float()
+        w2c = torch.from_numpy(extrinsics).float()
         c2w = torch.linalg.inv(w2c)[:3, :4]
 
         img = Image.open(self.img_files[i])

@@ -17,7 +17,7 @@ def parse_args():
     )
     parser.add_argument('--image_input', default='frames', help='location for original images')
     parser.add_argument(
-        '--undistorted-output', default='images', help='location of undistorted images'
+        '--undistorted-output', default='images_undistorted', help='location of undistorted images'
     )
     parser.add_argument(
         '--overwrite', default=False, action='store_true', help='overwrite cache'
@@ -54,17 +54,13 @@ def resize_frames(args):
 
 
 def generate_masks(args):
-    undist_dir = os.path.join(args.root_dir, args.undistorted_output)
-    if not os.path.exists(undist_dir) or args.overwrite:
-        os.makedirs(undist_dir, exist_ok=True)
-        os.system(
-            f'cp -r {args.root_dir}/{args.images_resized}/*.png {args.root_dir}/images'
-        )
+    mask_dir = os.path.join(args.root_dir, 'masks')
+    if not os.path.exists(mask_dir) or args.overwrite:
+        os.makedirs(mask_dir, exist_ok=True)
         os.system(
             f'CUDA_VISIBLE_DEVICES={args.cuda_device} python preprocess/predict_mask.py '
             f'--root_dir {args.root_dir}'
         )
-        os.system(f'rm -r {args.root_dir}/images')
 
 
 def run_colmap(args):
@@ -103,7 +99,7 @@ def run_colmap(args):
             f'CUDA_VISIBLE_DEVICES={args.cuda_device} colmap image_undistorter '
             f'--input_path={args.root_dir}/sparse/0 '
             f'--image_path={args.root_dir}/{args.images_resized} '
-            f'--output_path={args.root_dir} '
+            f'--output_path={undist_dir} '
             f'--output_type=COLMAP'
         )
 

@@ -40,7 +40,6 @@ if __name__ == '__main__':
 
     print("Motion classes are :", DYNAMIC_CATEGORIES)
     print("Please modify the DYNAMIC_CATEGORIES variables to your need!")
-    os.makedirs(os.path.join(args.root_dir, 'masks'), exist_ok=True)
 
     cfg = get_cfg()
     cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"))
@@ -49,7 +48,7 @@ if __name__ == '__main__':
     predictor = DefaultPredictor(cfg)
 
     print("Predicting motion masks ...")
-    for img_p in tqdm(sorted(glob.glob(os.path.join(args.root_dir, 'images/*')))):
+    for img_p in tqdm(sorted(glob.glob(os.path.join(args.root_dir, 'images_resized/*')))):
         img = cv2.imread(img_p)
         outputs = predictor(img)
         motion_mask = 255*np.ones_like(img)
@@ -61,4 +60,4 @@ if __name__ == '__main__':
 
         # enlarge the mask a little to account for inaccurate boundaries
         motion_mask = cv2.erode(motion_mask, np.ones((15, 15), np.uint8), iterations=1)
-        cv2.imwrite(img_p.replace('images', 'masks')+'.png', motion_mask)
+        cv2.imwrite(img_p.replace('images_resized', 'masks')+'.png', motion_mask)

@@ -3,6 +3,7 @@ import torch
 from collections import defaultdict
 from torchvision.utils import save_image
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
 from .factory import BaseTrainer
 from models.nerf import NeRF, Embedding
@@ -111,8 +112,18 @@ class NeRFPlusPlusTrainer(BaseTrainer):
         for step in pbar:
             for m in self.models.values():
                 m.train()
-            # Sample batch
-            sample = train_dataset.sample(shuffle=True)
+
+            def get_sample():
+                return train_dataset.sample(shuffle=True)
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                samples = list(executor.map(lambda _: get_sample(), range(4)))
+
+            # a list of 4 sampled batches
+            sample = {}
+            for key in samples[0].keys():
+                if isinstance(samples[0][key], torch.Tensor):
+                    sample[key] = torch.cat([s[key] for s in samples], dim=0)
 
             rays = sample['rays'].to(self.device)  # [N_rays, 3]
             rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
@@ -202,12 +213,12 @@ class NeRFPlusPlusTrainer(BaseTrainer):
                     save_image(stack, save_name, nrow=3)
 
                     # get numpy arrays
-                    fg_img_pred = results['fg_rgb_fine'].view(H, W, 3).cpu()
+                    fg_img_pred = results[f'fg_rgb_{typ}'].view(H, W, 3).cpu()
                     fg_img_pred = fg_img_pred.permute(2, 0, 1)
-                    fg_depth_pred = results['fg_depth_fine'].view(H, W).cpu()
-                    bg_img_pred = results['bg_rgb_fine'].view(H, W, 3).cpu()
+                    fg_depth_pred = results[f'fg_depth_{typ}'].view(H, W).cpu()
+                    bg_img_pred = results[f'bg_rgb_{typ}'].view(H, W, 3).cpu()
                     bg_img_pred = bg_img_pred.permute(2, 0, 1)
-                    bg_depth_pred = results['bg_depth_fine'].view(H, W).cpu()
+                    bg_depth_pred = results[f'bg_depth_{typ}'].view(H, W).cpu()
 
                     # convert rgb to uint8
                     fg_depth_img = visualize_depth(fg_depth_pred)
