@@ -134,6 +134,8 @@ def generate_flow(args):
 
 def main():
     args = parse_args()
+    if not os.path.exists(args.root_dir):
+        raise FileNotFoundError(f"Root directory '{args.root_dir}' does not exist.")
     resize_frames(args)
     generate_masks(args)
     run_colmap(args)
