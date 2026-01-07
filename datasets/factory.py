@@ -27,5 +27,8 @@ class DataLoaderFactory:
         if dataset_name == "phototourism":
             from datasets.phototourism import PhototourismDataLoader
             return PhototourismDataLoader
+        if dataset_name == "llff":
+            from datasets.llff import LIFFDataLoader
+            return LIFFDataLoader
         else:
             raise ValueError(f"Unknown dataset type: {dataset_name}")
