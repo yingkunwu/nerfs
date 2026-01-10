@@ -23,7 +23,7 @@ def get_poses(images):
     return np.array(w2c_list)
 
 
-def load_colmap_depth(basedir, bounds, bd_factor=.75):
+def load_colmap_depth(basedir, bounds, sc):
     """
     Load per-pixel depths from COLMAP sparse reconstruction and return
     per-image depth/coordinate/error arrays.
@@ -43,7 +43,9 @@ def load_colmap_depth(basedir, bounds, bd_factor=.75):
             bounds in the same scale as the original reconstruction.
             bounds[i, 0] is the near bound and bounds[i, 1] is the far bound
             for image i.
-    - bd_factor (float or None, optional, default=0.75):
+    - sc (float):
+            Scale factor used to normalize the depth values from the original
+            reconstruction scale.
 
     Return value
     - list of dicts, one entry per image that had at least one valid sample.
@@ -67,8 +69,6 @@ def load_colmap_depth(basedir, bounds, bd_factor=.75):
     print("Mean Projection Error:", Err_mean)
 
     poses_inv = get_poses(images)  # w2c -> inverse of the camera pose
-    sc = 1. if bd_factor is None else 1. / (bounds.min() * bd_factor)
-
     print("Depth points' statistics from Colmap:")
 
     data_list = []
@@ -85,11 +85,11 @@ def load_colmap_depth(basedir, bounds, bd_factor=.75):
 
             point3D_hom = np.array([*point3D_world, 1]).reshape(4, 1)
             point3D_cam = poses_inv[id_im - 1, :3] @ point3D_hom
-            depth = point3D_cam[2, 0] * sc
+            depth = point3D_cam[2, 0] / sc
 
-            if (depth < bounds[id_im - 1, 0] * sc
-                    or depth > bounds[id_im - 1, 1] * sc):
+            if (depth < bounds[id_im - 1, 0] or depth > bounds[id_im - 1, 1]):
                 continue
+
             err = points[id_3D].error
             weight = 2 * np.exp(-((err / Err_mean) ** 2))
             depth_list.append(depth)
@@ -126,16 +126,20 @@ def load_colmap_depth(basedir, bounds, bd_factor=.75):
 
 class LIFFDataLoader(DataLoader):
     def __init__(self,
+                 name,
                  root_dir,
                  split,
                  resolution=1,
                  bd_factor=0.75,
+                 use_ndc=False,
                  load_depth=False):
         super().__init__()
+        self.name = name
         self.root_dir = root_dir
         self.split = split
         self.resolution = resolution
         self.bd_factor = bd_factor
+        self.use_ndc = use_ndc
         self.load_depth = load_depth
 
         assert split in ['train', 'val'], 'split must be either train or val'
@@ -151,10 +155,6 @@ class LIFFDataLoader(DataLoader):
         # poses_bounds.shape -> (N_images, 17)
         poses = poses_bounds[:, :15].reshape(-1, 3, 5)  # (N_images, 3, 5)
         self.bounds = poses_bounds[:, -2:]  # (N_images, 2)
-
-        if load_depth:
-            self.depth_info = load_colmap_depth(
-                root_dir, self.bounds, self.bd_factor)
 
         # rescale focal length according to training resolution
         H, W, self.focal = poses[0, :, -1]  # original intrinsics
@@ -176,9 +176,13 @@ class LIFFDataLoader(DataLoader):
         # 調整過後這個最接近相機的點的深度就會位於 1.0 / 0.75 = 1.3333... 的位置
         # 因此這個時候相機的姿態也要跟著做調整
         near_original = self.bounds.min()
-        scale_factor = near_original * 0.75
+        scale_factor = near_original * bd_factor
         self.bounds /= scale_factor
         self.poses[..., 3] /= scale_factor
+
+        if load_depth:
+            self.depth_info = load_colmap_depth(
+                root_dir, bounds=self.bounds, sc=scale_factor)
 
         K = np.array([
             [self.focal, 0.0, self.img_wh[0] / 2.0],
@@ -194,10 +198,6 @@ class LIFFDataLoader(DataLoader):
         else:
             self.frames = [0]
         self.count = 0
-
-        # assuming that we are using normalized device coordinate (NDC)
-        self.near = 0
-        self.far = 1
 
     def __len__(self):
         return len(self.frames)
@@ -222,8 +222,6 @@ class LIFFDataLoader(DataLoader):
         if idx is not None:
             i = idx
 
-        c2w = torch.from_numpy(self.poses[i]).to(torch.float32)
-
         img = Image.open(self.image_paths[i])
         new_w, new_h = self.img_wh
         img = img.resize((new_w, new_h), Image.LANCZOS)
@@ -240,16 +238,39 @@ class LIFFDataLoader(DataLoader):
         # nerf的near是用來做sampling的，而這裡的near是ndc空間的near plane位置。
         # 根據ndc ray的轉換，當我們在ndc空間做 [near, far]=[0, 1] 的sampling時，
         # 實際上對應到原本的世界座標系統會是在 [0, 無限大] 的範圍內做sampling。
+        c2w = torch.from_numpy(self.poses[i]).float()
         rays_o, rays_d = get_rays(self.directions, c2w)
-        rays_o, rays_d = get_ndc_rays(self.K, 1.0, rays_o, rays_d)
-        near = self.near * torch.ones_like(rays_o[:, :1])
-        far = self.far * torch.ones_like(rays_o[:, :1])
+
+        if self.use_ndc:
+            rays_o, rays_d = get_ndc_rays(self.K, 1.0, rays_o, rays_d)
+            near, far = 0, 1
+        else:
+            near = self.bounds.min() * 0.9
+            far = self.bounds.max() * 1.0
+
+        near = near * torch.ones_like(rays_o[:, :1])
+        far = far * torch.ones_like(rays_o[:, :1])
         rays = torch.cat([rays_o, rays_d, near, far], dim=1)
 
-        return {
+        data = {
             'image_path': self.image_paths[i],
             'pose': c2w,
             'rays': rays,
             'rgbs': img,
             'image_size': (new_h, new_w),
         }
+
+        if self.load_depth:
+            # note that we do not use ndc coordinate for depth rays
+            depths = torch.from_numpy(self.depth_info[i]['depth']).float()
+            weights = torch.from_numpy(self.depth_info[i]['error']).float()
+            coords = torch.from_numpy(self.depth_info[i]['coord']).float()
+            rays_directions = get_ray_directions(
+                self.img_wh[1], self.img_wh[0], self.K, coords=coords)  # N x 3
+            rays_o, rays_d = get_rays(rays_directions, c2w)
+
+            rays_depth = torch.cat(
+                [rays_o, rays_d, depths[:, None], weights[:, None]], dim=-1)
+            data["rays_depth"] = rays_depth
+
+        return data

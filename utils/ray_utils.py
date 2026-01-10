@@ -38,21 +38,51 @@ def create_meshgrid(H: int,
     return grid.unsqueeze(0)  # (1, H, W, 2)
 
 
-def get_ray_directions(H, W, K, return_uv=False):
+def get_ray_directions(H, W, K, coords=None, return_uv=False):
     """
-    Get ray directions for all pixels in camera coordinate.
-    Reference:
-      https://www.scratchapixel.com/lessons/3d-basic-rendering/
-      ray-tracing-generating-camera-rays/standard-coordinate-systems
+    Compute ray direction vectors in the camera coordinate system for pixels.
+    The function converts image pixel coordinates into 3D ray directions
+    expressed in the camera coordinate frame using the intrinsic matrix K.
+    The produced directions point from the camera center through the pixel
+    on the image plane. Note: directions are not necessarily unit-length.
 
-    Inputs:
-        H, W, K: image height, width and camera intrinsics
+    Parameters
+    ----------
+    H : int
+        Image height in pixels.
+    W : int
+        Image width in pixels.
+    K : torch.Tensor or array-like, shape (3, 3)
+        Camera intrinsic matrix. Expected layout:
+            [[fx,  0, cx],
+             [ 0, fy, cy],
+             [ 0,  0,  1]]
+    coords : torch.Tensor, optional
+        If provided, a 2D tensor of shape (N, 2) containing pixel coordinates
+        to sample, each row is (u, v).
+        If coords is None (default), directions are computed for every pixel
+        and a full meshgrid of shape (H, W, 2) is constructed internally.
+    return_uv : bool, optional
+        If False (default) the function returns only the ray directions.
+        If True and coords is None, the function also returns the generated
+        pixel coordinate grid (meshgrid) as a tensor of shape (H, W, 2)
+        containing (i, j) pairs.
 
-    Outputs:
-        directions: (H, W, 3), the direction of the rays in camera coord.
+    Returns
+    -------
+    directions : torch.Tensor
+        Ray direction vectors in camera coordinates. (OpenGL's convention)
+        OpenGL's convention: x axis to the right, y axis upward in camera
+        coordinates; z is negative along the camera viewing direction.
+    grid : torch.Tensor, optional
+        Only returned when return_uv is True and coords is None.
+        The full pixel coordinate grid (H, W, 2) where grid[y, x] = (i, j).
     """
-    grid = create_meshgrid(H, W, normalized_coordinates=False)[0]
-    i, j = grid.unbind(-1)
+    if coords is None:
+        grid = create_meshgrid(H, W, normalized_coordinates=False)[0]
+        i, j = grid.unbind(-1)
+    else:
+        i, j = coords[:, 0], coords[:, 1]
 
     assert K.shape == (3, 3), "K must be of shape (3, 3)"
     fx = K[0, 0]
@@ -74,6 +104,9 @@ def get_ray_directions(H, W, K, return_uv=False):
         dim=-1,
     )
     if return_uv:
+        if coords is not None:
+            raise ValueError(
+                "return_uv=True is only supported when coords is None")
         return directions, grid
 
     return directions

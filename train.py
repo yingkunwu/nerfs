@@ -35,9 +35,9 @@ if __name__ == "__main__":
     expname = cfg.expname
     logdir = os.path.join(basedir, expname)
 
-    dataloader = DataLoaderFactory.get_loader(cfg.dataset)
-    train_dataset = dataloader(root_dir=cfg.datadir, split='train')
-    val_dataset = dataloader(root_dir=cfg.datadir, split='val')
+    dataloader = DataLoaderFactory.get_loader(cfg.dataset.name)
+    train_dataset = dataloader(split='train', **cfg.dataset)
+    val_dataset = dataloader(split='val', **cfg.dataset)
 
     trainer = TrainerFactory.get_trainer(cfg.trainer)(cfg, logdir)
     trainer.fit(train_dataset, val_dataset)
