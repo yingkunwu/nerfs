@@ -68,8 +68,8 @@ def get_ray_directions(H, W, K, return_uv=False):
     directions = torch.stack(
         [
             (i - cx) / fx,
-            (j - cy) / fy,
-            torch.ones_like(i),
+            -(j - cy) / fy,
+            -torch.ones_like(i),
         ],
         dim=-1,
     )
@@ -152,14 +152,6 @@ def get_ndc_rays(K, near, rays_o, rays_d):
     rays_d = torch.stack([d0, d1, d2], -1)  # (B, 3)
 
     return rays_o, rays_d
-
-
-# NOTE: WE DO IN COLMAP/OPENCV FORMAT, BUT INPUT IS OPENGL FORMAT!!!!!
-def perspective_projection(pts_3d, h, w, f):
-    x = pts_3d[..., 0:1] * f / -pts_3d[..., 2:3] + w / 2.0
-    y = -pts_3d[..., 1:2] * f / -pts_3d[..., 2:3] + h / 2.0
-    pts_2d = torch.cat([x, y], dim=-1)
-    return pts_2d
 
 
 def ndc2world(xyz, K, eps=1e-6):

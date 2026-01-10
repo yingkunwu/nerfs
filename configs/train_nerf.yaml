@@ -1,7 +1,7 @@
-expname: nerf
+expname: nerf_8
 basedir: ./logs
-datadir: ./data/nerf_synthetic/lego
-dataset: "blender"
+datadir: ./data/horns_8
+dataset: llff
 trainer: nerf
 
 # model
@@ -27,5 +27,5 @@ N_samples: 64
 N_importance: 128
 perturb: 1.0
 noise_std: 1.0
-white_back: true  # use white background for rendering when using blender dataset
+white_back: false  # use white background for rendering when using blender dataset
 gpu: 0

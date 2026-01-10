@@ -80,9 +80,6 @@ class NeRFTrainer(BaseTrainer):
         return results
 
     def fit(self, train_dataset, val_dataset):
-        # training hyperparams
-        batch_size = int(getattr(self.cfg, "batch_size", 1024))
-
         print("Starting training loop")
         best_psnr = 0.0
         pbar = tqdm(range(self.cfg.iters), total=self.cfg.iters)
@@ -94,7 +91,8 @@ class NeRFTrainer(BaseTrainer):
 
             rays = sample['rays'].to(self.device)  # [N_rays, 3]
             rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
-            idx = torch.randint(0, rays.shape[0], (batch_size,),
+            idx = torch.randint(0, rays.shape[0],
+                                (self.cfg.batch_size,),
                                 device=self.device)
             rays = rays[idx]
             rgbs = rgbs[idx]
