@@ -197,7 +197,7 @@ class LIFFDataLoader(DataLoader):
             self.img_wh[1], self.img_wh[0], self.K)
 
         if self.split == 'train':
-            self.frames = range(1, 4)
+            self.frames = range(1, len(self.image_paths))
         else:
             self.frames = [0]
         self.count = 0

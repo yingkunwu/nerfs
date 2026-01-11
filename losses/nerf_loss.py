@@ -28,10 +28,14 @@ class DepthLoss(nn.Module):
         depth_values = inputs['depth_values']
         depth_weights = inputs['depth_weights']
 
-        # clip deltas [z, infinity] to stabilize training
-        weights_coarse = results['weights_coarse'][..., :-1]
-        z_vals_coarse = results['z_vals_coarse'][..., :-1]
+        weights_coarse = results['weights_coarse']
+        z_vals_coarse = results['z_vals_coarse']
         deltas_coarse = results['deltas_coarse'][..., :-1]
+        # Here we get rid of the last infinite interval and replicate the
+        # second last delta to keep the integral approximation reasonable
+        # locally.
+        last_delta = deltas_coarse[:, -1:]
+        deltas_coarse = torch.cat([deltas_coarse, last_delta], dim=-1)
 
         coarse_loss = -torch.log(weights_coarse + 1e-5) \
             * torch.exp(
@@ -41,9 +45,11 @@ class DepthLoss(nn.Module):
         loss = {'depth_coarse_loss': self.sigma_lambda * coarse_loss.mean()}
 
         if 'rgb_fine' in results:
-            weights_fine = results['weights_fine'][..., :-1]
-            z_vals_fine = results['z_vals_fine'][..., :-1]
+            weights_fine = results['weights_fine']
+            z_vals_fine = results['z_vals_fine']
             deltas_fine = results['deltas_fine'][..., :-1]
+            last_delta = deltas_fine[:, -1:]
+            deltas_fine = torch.cat([deltas_fine, last_delta], dim=-1)
 
             fine_loss = -torch.log(weights_fine + 1e-5) \
                 * torch.exp(
