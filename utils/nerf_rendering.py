@@ -68,7 +68,7 @@ def inference(
         # adding this term fills remaining transparency with white color.
         rgb_final = rgb_final + (1 - weights_sum[..., None])
 
-    return rgb_final, depth_final, weights
+    return rgb_final, depth_final, weights, deltas
 
 
 def render_rays(
@@ -111,17 +111,19 @@ def render_rays(
         + rearrange(rays_d, 'r d -> r 1 d')
         * rearrange(z_vals, 'r n -> r n 1')
     )
-    rgb_coarse, depth_coarse, weights_coarse = inference(
+    rgb_coarse, depth_coarse, weights_coarse, deltas_coarse = inference(
         model_coarse, embeddings, pts_coarse, rays_d, z_vals,
         noise_std, white_back
     )
     result = {
         'rgb_coarse': rgb_coarse,
         'depth_coarse': depth_coarse,
-        'opacity_coarse': weights_coarse.sum(dim=1),
+        'weights_coarse': weights_coarse,
+        'deltas_coarse': deltas_coarse,
+        'z_vals_coarse': z_vals.clone()
     }
 
-    if N_importance > 0:
+    if N_importance > 0 and 'fine' in models:
         model_fine = models['fine']
         # To build a piecewise-constant PDF, we need bin centers.
         mids = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])
@@ -136,13 +138,16 @@ def render_rays(
             + rearrange(rays_d, 'r d -> r 1 d')
             * rearrange(z_vals, 'r n -> r n 1')
         )
-        rgb_fine, depth_fine, weights_fine = inference(
+        rgb_fine, depth_fine, weights_fine, deltas_fine = inference(
             model_fine, embeddings, pts_fine, rays_d, z_vals,
             noise_std, white_back
         )
         result.update({
             'rgb_fine': rgb_fine,
             'depth_fine': depth_fine,
-            'opacity_fine': weights_fine.sum(dim=1)
+            'weights_fine': weights_fine,
+            'deltas_fine': deltas_fine,
+            'z_vals_fine': z_vals.clone()
         })
+
     return result

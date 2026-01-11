@@ -6,7 +6,7 @@ from tqdm import tqdm
 
 from .factory import BaseTrainer
 from models.nerf import NeRF, Embedding
-from losses.nerf_loss import NeRFLoss
+from losses.nerf_loss import NeRFLoss, DepthLoss
 from utils.nerf_rendering import render_rays
 from utils.metrics import psnr
 from utils.misc import visualize_depth
@@ -16,6 +16,9 @@ class NeRFTrainer(BaseTrainer):
     def __init__(self, cfg, log_dir):
         super().__init__(cfg, log_dir)
         self.criterion = NeRFLoss()
+        self.depth_loss = None
+        if cfg.use_depth_loss:
+            self.depth_loss = DepthLoss()
 
     def create_nerf(self, cfg):
         """Create NeRF model and embeddings."""
@@ -57,6 +60,16 @@ class NeRFTrainer(BaseTrainer):
     def forward(self, inputs):
         """Do batched inference on rays using chunk."""
         rays = inputs['rays']
+        rays_batch_size = rays.shape[0]
+
+        if self.depth_loss is not None:
+            assert 'depth_rays' in inputs, \
+                "depth_rays not found in inputs. Please make sure your data " \
+                "folder includes colmap's output and set dataset.load_depth " \
+                "to True."
+
+            depth_rays = inputs['depth_rays']
+            rays = torch.cat([rays, depth_rays], dim=0)
 
         B = rays.shape[0]
         results = defaultdict(list)
@@ -77,7 +90,54 @@ class NeRFTrainer(BaseTrainer):
         for k, v in results.items():
             results[k] = torch.cat(v, 0)
 
-        return results
+        depth_results = defaultdict(list)
+        if self.depth_loss is not None:
+            for k, v in results.items():
+                results[k] = v[:rays_batch_size]
+                depth_results[k] = v[rays_batch_size:]
+
+        log = self.criterion(results, inputs)
+        if self.depth_loss is not None:
+            log.update(self.depth_loss(depth_results, inputs))
+
+        return results, log
+
+    def extract_from_sample(self, sample, batch_size=None):
+        rays = sample['rays'].to(self.device)  # [N_rays, 3]
+        rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
+
+        if batch_size is not None:
+            idx = torch.randint(0, rays.shape[0],
+                                (batch_size,),
+                                device=self.device)
+            rays = rays[idx]
+            rgbs = rgbs[idx]
+
+        inputs = {
+            "rays": rays,
+            "rgbs": rgbs
+        }
+
+        if "depth_rays" in sample:
+            depth_rays = sample['depth_rays'].to(self.device)
+            depth_values = sample["depth_values"].to(self.device)
+            depth_weights = sample["depth_weights"].to(self.device)
+
+            if batch_size is not None:
+                idx = torch.randint(0, depth_rays.shape[0],
+                                    (batch_size // 4,),
+                                    device=self.device)
+                depth_rays = depth_rays[idx]
+                depth_values = depth_values[idx]
+                depth_weights = depth_weights[idx]
+
+            inputs.update({
+                "depth_rays": depth_rays,
+                "depth_values": depth_values,
+                "depth_weights": depth_weights
+            })
+
+        return inputs
 
     def fit(self, train_dataset, val_dataset):
         print("Starting training loop")
@@ -88,29 +148,18 @@ class NeRFTrainer(BaseTrainer):
                 m.train()
             # Sample batch
             sample = train_dataset.sample(shuffle=True)
-
-            rays = sample['rays'].to(self.device)  # [N_rays, 3]
-            rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
-            idx = torch.randint(0, rays.shape[0],
-                                (self.cfg.batch_size,),
-                                device=self.device)
-            rays = rays[idx]
-            rgbs = rgbs[idx]
+            inputs = self.extract_from_sample(sample, self.cfg.batch_size)
 
             # advance the batch pointer
             self.optimizer.zero_grad()
 
-            inputs = {'rays': rays}
-            targets = {'rgbs': rgbs}
-
-            results = self.forward(inputs)
-            log = self.criterion(results, targets)
+            results, log = self.forward(inputs)
 
             log['train/psnr_coarse'] = psnr(
-                results['rgb_coarse'], targets['rgbs'])
+                results['rgb_coarse'], inputs['rgbs'])
             if 'rgb_fine' in results:
                 log['train/psnr_fine'] = psnr(
-                    results['rgb_fine'], targets['rgbs'])
+                    results['rgb_fine'], inputs['rgbs'])
             log['train/loss'] = sum(
                 [v for k, v in log.items() if 'loss' in k])
 
@@ -141,20 +190,15 @@ class NeRFTrainer(BaseTrainer):
                     for m in self.models.values():
                         m.eval()
                     sample = val_dataset.sample(shuffle=False)
-                    rays = sample['rays'].to(self.device)  # [N_rays, 3]
-                    rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
+                    inputs = self.extract_from_sample(sample)
 
-                    inputs = {'rays': rays}
-                    targets = {'rgbs': rgbs}
-
-                    results = self.forward(inputs)
-                    log = self.criterion(results, targets)
+                    results, log = self.forward(inputs)
 
                     log['val/psnr_coarse'] = psnr(
-                        results['rgb_coarse'], targets['rgbs'])
+                        results['rgb_coarse'], inputs['rgbs'])
                     if 'rgb_fine' in results:
                         log['val/psnr_fine'] = psnr(
-                            results['rgb_fine'], targets['rgbs'])
+                            results['rgb_fine'], inputs['rgbs'])
                     log['val/loss'] = sum(
                         [v for k, v in log.items() if 'loss' in k])
 
@@ -168,7 +212,8 @@ class NeRFTrainer(BaseTrainer):
                     H, W = sample['image_size']
                     img = results[f'rgb_{typ}'].view(H, W, 3).cpu()
                     img = img.permute(2, 0, 1)
-                    img_gt = rgbs.view(H, W, 3).permute(2, 0, 1).cpu()
+                    img_gt = inputs['rgbs'].view(H, W, 3).cpu()
+                    img_gt = img_gt.permute(2, 0, 1)
                     depth = visualize_depth(results[f'depth_{typ}'].view(H, W))
                     stack = torch.stack([img_gt, img, depth])
                     self.writer.add_images('val/visualization', stack, step)

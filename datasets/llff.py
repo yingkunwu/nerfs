@@ -248,9 +248,9 @@ class LIFFDataLoader(DataLoader):
             near = self.bounds.min() * 0.9
             far = self.bounds.max() * 1.0
 
-        near = near * torch.ones_like(rays_o[:, :1])
-        far = far * torch.ones_like(rays_o[:, :1])
-        rays = torch.cat([rays_o, rays_d, near, far], dim=1)
+        near_ = near * torch.ones_like(rays_o[:, :1])
+        far_ = far * torch.ones_like(rays_o[:, :1])
+        rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
 
         data = {
             'image_path': self.image_paths[i],
@@ -269,8 +269,13 @@ class LIFFDataLoader(DataLoader):
                 self.img_wh[1], self.img_wh[0], self.K, coords=coords)  # N x 3
             rays_o, rays_d = get_rays(rays_directions, c2w)
 
-            rays_depth = torch.cat(
-                [rays_o, rays_d, depths[:, None], weights[:, None]], dim=-1)
-            data["rays_depth"] = rays_depth
+            near_ = near * torch.ones_like(rays_o[:, :1])
+            far_ = far * torch.ones_like(rays_o[:, :1])
+
+            data.update({
+                "depth_rays": torch.cat([rays_o, rays_d, near_, far_], dim=-1),
+                "depth_values": depths[:, None],
+                "depth_weights": weights[:, None]
+            })
 
         return data
