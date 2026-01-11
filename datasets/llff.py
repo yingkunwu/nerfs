@@ -58,8 +58,10 @@ def load_colmap_depth(basedir, bounds, sc):
                 confidence weight per sample
 
     """
-    images_path = os.path.join(basedir, 'sparse', '0', 'images.bin')
-    points_path = os.path.join(basedir, 'sparse', '0', 'points3D.bin')
+    images_path = os.path.join(
+        basedir, 'images_undistorted', 'sparse', 'images.bin')
+    points_path = os.path.join(
+        basedir, 'images_undistorted', 'sparse', 'points3D.bin')
 
     images = read_images_binary(images_path)
     points = read_points3d_binary(points_path)
@@ -160,6 +162,7 @@ class LIFFDataLoader(DataLoader):
         H, W, self.focal = poses[0, :, -1]  # original intrinsics
 
         # scale intrinsics to match resized image
+        self.ori_img_wh = (W, H)
         self.img_wh = (int(W * self.resolution), int(H * self.resolution))
         self.focal *= self.img_wh[0] / W
 
@@ -194,7 +197,7 @@ class LIFFDataLoader(DataLoader):
             self.img_wh[1], self.img_wh[0], self.K)
 
         if self.split == 'train':
-            self.frames = range(1, len(self.image_paths))
+            self.frames = range(1, 4)
         else:
             self.frames = [0]
         self.count = 0
@@ -265,6 +268,10 @@ class LIFFDataLoader(DataLoader):
             depths = torch.from_numpy(self.depth_info[i]['depth']).float()
             weights = torch.from_numpy(self.depth_info[i]['error']).float()
             coords = torch.from_numpy(self.depth_info[i]['coord']).float()
+
+            coords[:, 0] *= self.img_wh[0] / self.ori_img_wh[0]
+            coords[:, 1] *= self.img_wh[1] / self.ori_img_wh[1]
+
             rays_directions = get_ray_directions(
                 self.img_wh[1], self.img_wh[0], self.K, coords=coords)  # N x 3
             rays_o, rays_d = get_rays(rays_directions, c2w)

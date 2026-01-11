@@ -6,7 +6,8 @@ import read_write_model
 
 
 def load_colmap_data(realdir):
-    camerasfile = os.path.join(realdir, 'sparse/0/cameras.bin')
+    camerasfile = os.path.join(
+        realdir, 'images_undistorted/sparse/cameras.bin')
     camdata = read_write_model.read_cameras_binary(camerasfile)
 
     list_of_keys = list(camdata.keys())
@@ -16,7 +17,8 @@ def load_colmap_data(realdir):
     h, w, f = cam.height, cam.width, cam.params[0]
     hwf = np.array([h, w, f]).reshape([3, 1])
 
-    imagesfile = os.path.join(realdir, 'sparse/0/images.bin')
+    imagesfile = os.path.join(
+        realdir, 'images_undistorted/sparse/images.bin')
     imdata = read_write_model.read_images_binary(imagesfile)
 
     w2c_mats = []
@@ -40,7 +42,8 @@ def load_colmap_data(realdir):
         [poses, np.tile(hwf[..., np.newaxis], [1, 1, poses.shape[-1]])], 1
     )
 
-    points3dfile = os.path.join(realdir, 'sparse/0/points3D.bin')
+    points3dfile = os.path.join(
+        realdir, 'images_undistorted/sparse/points3D.bin')
     pts3d = read_write_model.read_points3d_binary(points3dfile)
 
     # must switch to [-u, r, -t] from [r, -u, t], NOT [r, u, -t]

@@ -103,39 +103,64 @@ class NeRFTrainer(BaseTrainer):
         return results, log
 
     def extract_from_sample(self, sample, batch_size=None):
+        # 1. Load basic RGB rays
         rays = sample['rays'].to(self.device)  # [N_rays, 3]
         rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
-
-        if batch_size is not None:
-            idx = torch.randint(0, rays.shape[0],
-                                (batch_size,),
-                                device=self.device)
-            rays = rays[idx]
-            rgbs = rgbs[idx]
-
-        inputs = {
-            "rays": rays,
-            "rgbs": rgbs
-        }
+        num_rgb_rays = rays.shape[0]
 
         if "depth_rays" in sample:
             depth_rays = sample['depth_rays'].to(self.device)
             depth_values = sample["depth_values"].to(self.device)
             depth_weights = sample["depth_weights"].to(self.device)
 
-            if batch_size is not None:
-                idx = torch.randint(0, depth_rays.shape[0],
-                                    (batch_size // 4,),
-                                    device=self.device)
-                depth_rays = depth_rays[idx]
-                depth_values = depth_values[idx]
-                depth_weights = depth_weights[idx]
+            num_depth_rays = depth_rays.shape[0]
 
-            inputs.update({
+            if batch_size is not None:
+                total_rays = num_rgb_rays + num_depth_rays
+
+                # Sample indices from the combined pool [0, total_rays)
+                global_idx = torch.randint(0, total_rays,
+                                           (batch_size,),
+                                           device=self.device)
+
+                # Identify which indices belong to the RGB portion
+                # Indices < num_rgb_rays belong to the standard ray set
+                rgb_mask = global_idx < num_rgb_rays
+
+                # Extract RGB indices
+                rgb_idx = global_idx[rgb_mask]
+
+                # Extract Depth indices
+                depth_idx = global_idx[~rgb_mask] - num_rgb_rays
+
+                # Apply the indices
+                rays = rays[rgb_idx]
+                rgbs = rgbs[rgb_idx]
+
+                depth_rays = depth_rays[depth_idx]
+                depth_values = depth_values[depth_idx]
+                depth_weights = depth_weights[depth_idx]
+
+            inputs = {
+                "rays": rays,
+                "rgbs": rgbs,
                 "depth_rays": depth_rays,
                 "depth_values": depth_values,
                 "depth_weights": depth_weights
-            })
+            }
+
+        else:
+            if batch_size is not None:
+                idx = torch.randint(0, num_rgb_rays,
+                                    (batch_size,),
+                                    device=self.device)
+                rays = rays[idx]
+                rgbs = rgbs[idx]
+
+            inputs = {
+                "rays": rays,
+                "rgbs": rgbs
+            }
 
         return inputs
 
