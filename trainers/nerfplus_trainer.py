@@ -113,17 +113,7 @@ class NeRFPlusPlusTrainer(BaseTrainer):
             for m in self.models.values():
                 m.train()
 
-            def get_sample():
-                return train_dataset.sample(shuffle=True)
-
-            with ThreadPoolExecutor(max_workers=4) as executor:
-                samples = list(executor.map(lambda _: get_sample(), range(4)))
-
-            # a list of 4 sampled batches
-            sample = {}
-            for key in samples[0].keys():
-                if isinstance(samples[0][key], torch.Tensor):
-                    sample[key] = torch.cat([s[key] for s in samples], dim=0)
+            sample = train_dataset.sample(shuffle=True)
 
             rays = sample['rays'].to(self.device)  # [N_rays, 3]
             rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]

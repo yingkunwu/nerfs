@@ -1,8 +1,11 @@
 expname: nerf++
 basedir: ./logs
-datadir: ./samples/split_data
-dataset: "tanks_and_temples"
 trainer: nerfplusplus
+
+dataset:
+  name: tanks_and_temples
+  root_dir: ./data/Truck/split_data
+  resolution: 1
 
 # model
 model:
@@ -13,12 +16,12 @@ model:
   skips: [4]  # add skip connection in the Dth layer
 
 # Hyperparameters
-iters: 250000  # total training iterations
+iters: 500000  # total training iterations
 lr: 0.0005
 momentum: 0.9
 weight_decay: 0.0
 scheduler:
-  decay_step: [150000, 200000]
+  decay_step: [300000, 400000]
   decay_gamma: 0.1
 
 batch_size: 1024  # number of rays per batch

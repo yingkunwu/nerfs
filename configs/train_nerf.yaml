@@ -1,8 +1,13 @@
-expname: nerf_8
+expname: nerf
 basedir: ./logs
-datadir: ./data/horns_8
-dataset: llff
 trainer: nerf
+
+dataset:
+  name: llff
+  root_dir: ./data/horns_8
+  resolution: 1
+  use_ndc: True
+  load_depth: False
 
 # model
 model:
@@ -21,6 +26,7 @@ scheduler:
   decay_step: [30000]
   decay_gamma: 0.1
 
+use_depth_loss: False  # Depth loss option from Depth-Supervised NeRF
 batch_size: 2048  # number of rays per batch
 chunk: 8192  # number of rays processed for inference
 N_samples: 64

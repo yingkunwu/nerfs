@@ -9,9 +9,18 @@ from .factory import DataLoader
 from utils.ray_utils import get_ray_directions, get_rays
 
 
+def convert_pose(C2W):
+    flip_yz = torch.eye(4)
+    flip_yz[1, 1] = -1
+    flip_yz[2, 2] = -1
+    C2W = torch.matmul(C2W, flip_yz)
+    return C2W
+
+
 class TNTDataLoader(DataLoader):
-    def __init__(self, root_dir, split, resolution=1):
+    def __init__(self, name, root_dir, split, resolution=1):
         super().__init__()
+        self.name = name
         self.root_dir = root_dir
         self.split = split
         self.resolution = resolution
@@ -74,7 +83,8 @@ class TNTDataLoader(DataLoader):
         extrinsics = self._parse_txt(self.extrinsics_files[i])
         # w2c is the camera extrinsic matrix
         w2c = torch.from_numpy(extrinsics).float()
-        c2w = torch.linalg.inv(w2c)[:3, :4]
+        c2w = torch.linalg.inv(w2c)
+        c2w = convert_pose(c2w)[:3]
 
         img = Image.open(self.img_files[i])
         w, h = img.size  # PIL: (width, height)
