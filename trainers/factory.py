@@ -117,5 +117,8 @@ class TrainerFactory:
         if trainer_name == "nerfplusplus":
             from trainers.nerfplus_trainer import NeRFPlusPlusTrainer
             return NeRFPlusPlusTrainer
+        if trainer_name == "nerfw":
+            from trainers.nerfw_trainer import NeRFWTrainer
+            return NeRFWTrainer
         else:
             raise ValueError(f"Unknown dataset type: {trainer_name}")

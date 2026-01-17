@@ -20,6 +20,7 @@ def convert_pose(C2W):
 class TNTDataLoader(DataLoader):
     def __init__(self, name, root_dir, split, resolution=1):
         super().__init__()
+        assert resolution <= 1, "resolution must be <= 1"
         self.name = name
         self.root_dir = root_dir
         self.split = split

@@ -42,8 +42,10 @@ def add_perturbation(img, perturbation, seed):
 
 
 class BlenderDataLoader(DataLoader):
-    def __init__(self, root_dir, split, resolution=1):
+    def __init__(self, name, root_dir, split, resolution=1):
         super().__init__()
+        assert resolution <= 1, "resolution must be <= 1"
+        self.name = name
         self.root_dir = root_dir
         self.split = split
         self.resolution = resolution

@@ -39,5 +39,11 @@ if __name__ == "__main__":
     train_dataset = dataloader(split='train', **cfg.dataset)
     val_dataset = dataloader(split='val', **cfg.dataset)
 
+    # this will only be used by nerfw
+    if cfg.trainer == "nerfw":
+        cfg.N_vocab = train_dataset.__len__()  # set vocab size
+        # note that here appearance and transient embeddings are per-image
+        # so N_vocab = number of images in the training set and since it is
+        # only applied during training, val images do not have embeddings
     trainer = TrainerFactory.get_trainer(cfg.trainer)(cfg, logdir)
     trainer.fit(train_dataset, val_dataset)

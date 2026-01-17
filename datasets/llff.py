@@ -136,6 +136,7 @@ class LIFFDataLoader(DataLoader):
                  use_ndc=False,
                  load_depth=False):
         super().__init__()
+        assert resolution <= 1, "resolution must be <= 1"
         self.name = name
         self.root_dir = root_dir
         self.split = split

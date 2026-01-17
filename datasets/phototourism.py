@@ -15,9 +15,10 @@ from utils.colmap_utils import (
 
 
 class PhototourismDataLoader(DataLoader):
-    def __init__(self, root_dir, split, resolution=1):
+    def __init__(self, name, root_dir, split, resolution=1):
         super().__init__()
         assert resolution <= 1, "resolution must be <= 1"
+        self.name = name
         self.root_dir = Path(root_dir)
         self.split = split
         self.resolution = resolution
@@ -45,8 +46,8 @@ class PhototourismDataLoader(DataLoader):
         self._compute_near_far()
 
         if split == 'val':
-            # Use only first 20 images for validation
-            self.frames = list(range(len(self.img_files[:20])))
+            # Use first 10 images for validation
+            self.frames = list(range(len(self.img_files[:10])))
         else:
             self.frames = list(range(len(self.img_files)))
 
@@ -81,7 +82,10 @@ class PhototourismDataLoader(DataLoader):
             self._name_to_id[v.name] = v.id
 
     def _build_index(self):
-        for filename in list(self.files['filename']):
+        for idx, row in self.files.iterrows():
+            if row['split'] != "train":
+                continue
+            filename = row['filename']
             im_id = self._name_to_id[filename]
             self.ids.append(im_id)
             self.img_files.append(str(self.images_dir / filename))
@@ -119,7 +123,7 @@ class PhototourismDataLoader(DataLoader):
     def _resize_intrinsics(self, K, orig_hw):
         """Downscale intrinsics to match self.resolution (integer factor)."""
         h0, w0 = orig_hw
-        if self.resolution <= 1:
+        if self.resolution >= 1:
             return K.astype(np.float32), (h0, w0)
         new_h = int(h0 * self.resolution)
         new_w = int(w0 * self.resolution)
@@ -133,6 +137,7 @@ class PhototourismDataLoader(DataLoader):
     def _compute_near_far(self):
         """Compute per-frame near/far from triangulated 3D points."""
         if len(self._pts3d) == 0:
+            self._scale = 1.0
             self._nears = [0.1] * len(self.img_files)
             self._fars = [5.0] * len(self.img_files)
             return
@@ -204,6 +209,9 @@ class PhototourismDataLoader(DataLoader):
 
         w2c = torch.from_numpy(self._colmap_pose_w2c(im_id)).float()
         c2w = torch.linalg.inv(w2c)[:3, :4]
+        # Original poses has rotation in form "right down front",
+        # change to "right up back"
+        c2w[..., 1:3] *= -1
         c2w[:, 3] /= float(self._scale)  # Scale the translation
 
         raw_d = get_ray_directions(new_h, new_w, Kd)
@@ -219,7 +227,6 @@ class PhototourismDataLoader(DataLoader):
             "pose": c2w,
             "rays": rays,
             "rgbs": img_t,
-            "raw_d": raw_d,
             "image_size": (new_h, new_w),
             'rays_t': i * torch.ones(len(rays), dtype=torch.long)
         }
