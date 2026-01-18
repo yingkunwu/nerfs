@@ -127,6 +127,7 @@ class NeRFWTrainer(BaseTrainer):
             for m in self.models.values():
                 m.train()
             # Sample batch
+
             def get_sample():
                 return train_dataset.sample(shuffle=True)
 
