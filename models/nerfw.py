@@ -87,7 +87,7 @@ class NeRFW(nn.Module):
         # outputs
         self.static_sigma = nn.Sequential(
             nn.Linear(width, 1),
-            nn.Softplus()
+            nn.ReLU()
         )
         self.static_rgb = nn.Sequential(
             nn.Linear(width + in_ch_dir + self.in_ch_a, width // 2),
@@ -111,7 +111,7 @@ class NeRFW(nn.Module):
             # transient output layers
             self.transient_sigma = nn.Sequential(
                 nn.Linear(width // 2, 1),
-                nn.Softplus()
+                nn.ReLU()
             )
             self.transient_rgb = nn.Sequential(
                 nn.Linear(width // 2, 3),
@@ -122,16 +122,13 @@ class NeRFW(nn.Module):
                 nn.Softplus()
             )
 
-    def forward(self, x, sigma_only=False):
+    def forward(self, x):
         """
         Encode input (xyz + dir) to rgb and sigma.
 
         x: embedded vector of position (+ direction + appearance + transient)
-        sigma_only: if True, infer sigma only
         """
-        if sigma_only:
-            input_xyz = x
-        elif self.output_transient:
+        if self.output_transient:
             input_xyz, input_dir_a, input_t = torch.split(
                 x,
                 [self.in_ch_xyz, self.in_ch_dir + self.in_ch_a, self.in_ch_t],
@@ -151,9 +148,6 @@ class NeRFW(nn.Module):
             xyz_ = getattr(self, f"xyz_encoding_{i}")(xyz_)
 
         static_sigma = self.static_sigma(xyz_)  # (B, 1)
-        if sigma_only:
-            return static_sigma
-
         xyz_encoding_final = self.xyz_final(xyz_)
 
         dir_encoding_input = torch.cat(

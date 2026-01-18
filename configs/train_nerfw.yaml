@@ -5,13 +5,13 @@ trainer: nerfw
 dataset:
   name: phototourism
   root_dir: ./data/phototourism/brandenburg_gate
-  resolution: 1
+  resolution: 0.5
 
 # model
 model:
   depth: 8
   width: 256
-  xyz_embed_dim: 10  # for positional encoding
+  xyz_embed_dim: 15  # for positional encoding
   dir_embed_dim: 4  # for positional encoding
   app_embed_dim: 48  # for appearance embedding
   tra_embed_dim: 16  # for transient embedding
@@ -20,17 +20,17 @@ model:
   skips: [4]  # add skip connection in the Dth layer
 
 # Hyperparameters
-iters: 100000  # total training iterations
-lr: 5e-4
+iters: 200000  # total training iterations
+lr: 0.001
 momentum: 0.9
 weight_decay: 0.0
 scheduler:
-  decay_step: [60000]
+  decay_step: [120000, 160000]
   decay_gamma: 0.1
 
 batch_size: 2048  # number of rays per batch
 chunk: 8192  # number of rays processed for inference
-N_samples: 64
+N_samples: 128
 N_importance: 128
 perturb: 1.0
 noise_std: 0

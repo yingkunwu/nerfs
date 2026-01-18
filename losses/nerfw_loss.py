@@ -15,10 +15,9 @@ class NeRFWLoss(nn.Module):
 
         if 'rgb_fine' in inputs:
             # Compute the transient loss term for the fine output
-            diff = inputs['rgb_fine'] - targets['rgbs']
-            mse_term = (diff ** 2).mean(dim=1)
+            mse_term = (inputs['rgb_fine'] - targets['rgbs']) ** 2
             beta_sq = inputs['transient_beta_fine'] ** 2
-            transient_loss = (mse_term / (2 * beta_sq)).mean()
+            transient_loss = (mse_term / (2 * beta_sq[:, None])).mean()
             log_beta = torch.log(inputs['transient_beta_fine']).mean()
             sigma_term = self.lambda_u * inputs['transient_sigma_fine'].mean()
 

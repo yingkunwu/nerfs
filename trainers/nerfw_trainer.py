@@ -3,6 +3,7 @@ import torch
 from collections import defaultdict
 from torchvision.utils import save_image
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
 from .factory import BaseTrainer
 from models.nerfw import NeRFW, Embedding
@@ -46,6 +47,9 @@ class NeRFWTrainer(BaseTrainer):
             depth=cfg.model.depth,
             width=cfg.model.width,
             skips=cfg.model.skips,
+            in_ch_xyz=embeddings['xyz'].output_dim,
+            in_ch_dir=embeddings['dir'].output_dim,
+            in_ch_a=cfg.model.app_embed_dim
         )
 
         model_fine = NeRFW(
@@ -123,7 +127,24 @@ class NeRFWTrainer(BaseTrainer):
             for m in self.models.values():
                 m.train()
             # Sample batch
-            sample = train_dataset.sample(shuffle=True)
+            def get_sample():
+                return train_dataset.sample(shuffle=True)
+
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                samples = list(executor.map(lambda _: get_sample(), range(16)))
+
+            # a list of 16 sampled batches
+            sample = {}
+            for key in samples[0].keys():
+                if isinstance(samples[0][key], torch.Tensor):
+                    sample[key] = torch.cat([s[key] for s in samples], dim=0)
+                elif isinstance(samples[0][key], list):
+                    sample[key] = []
+                    for s in samples:
+                        sample[key].extend(s[key])
+                else:
+                    sample[key] = [s[key] for s in samples]
+
             inputs = self.extract_from_sample(sample, self.cfg.batch_size)
 
             # advance the batch pointer
