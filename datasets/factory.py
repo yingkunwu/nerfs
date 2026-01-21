@@ -30,5 +30,8 @@ class DataLoaderFactory:
         if dataset_name == "llff":
             from datasets.llff import LIFFDataLoader
             return LIFFDataLoader
+        if dataset_name == "dynamic":
+            from datasets.dynamic import DynamicDataLoader
+            return DynamicDataLoader
         else:
             raise ValueError(f"Unknown dataset type: {dataset_name}")

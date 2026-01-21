@@ -120,5 +120,8 @@ class TrainerFactory:
         if trainer_name == "nerfw":
             from trainers.nerfw_trainer import NeRFWTrainer
             return NeRFWTrainer
+        if trainer_name == "nsff":
+            from trainers.nsff_trainer import NSFFTrainer
+            return NSFFTrainer
         else:
             raise ValueError(f"Unknown dataset type: {trainer_name}")
