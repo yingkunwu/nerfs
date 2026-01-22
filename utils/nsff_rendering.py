@@ -316,5 +316,5 @@ def render_rays(
         'xyz_fw': blending_results['xyz_fw'],
         'raw_xyz_bw': blending_results['raw_xyz_bw'],
         'raw_xyz_fw': blending_results['raw_xyz_fw'],
-        'raw_pts_ref': blending_results['raw_pts_ref'],
+        'raw_pts_ref': blending_results['raw_pts_ref']
     }

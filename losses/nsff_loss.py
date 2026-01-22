@@ -6,17 +6,16 @@ from utils.ray_utils import ndc2world
 
 
 class NSFFLoss(nn.Module):
-    def __init__(self, lambda_geo=0.04, lambda_reg=0.1):
+    def __init__(self, decay_iteration=30, lambda_geo=0.04, lambda_reg=0.1):
         super().__init__()
         self.lambda_geo_d = lambda_geo
         self.lambda_geo_f = lambda_geo
         self.lambda_reg = lambda_reg
 
-        self.decay_iteration = 10000
+        self.decay_iteration = decay_iteration
         self.decay_rate = 10
-        self.count = 0
 
-    def forward(self, inputs, targets):
+    def forward(self, inputs, targets, global_step):
         # photo consistency loss
         render_loss = compute_mse(inputs['rgb_map_ref'], targets["rgbs"])
         render_loss += compute_mse(inputs['rgb_bw'],
@@ -100,8 +99,7 @@ class NSFFLoss(nn.Module):
             flow_loss += 0.02 * compute_mae(uv_bw[valid_geo_bw],
                                             targets['uv_bw'][valid_geo_bw])
 
-        divsor = self.count // self.decay_iteration
-        self.count += 1
+        divsor = global_step // (self.decay_iteration * 1000)
 
         loss = {
             'render_loss': render_loss,
@@ -111,8 +109,7 @@ class NSFFLoss(nn.Module):
             'reg_sp_sm_loss': reg_sp_sm_loss,
             'weight_close_loss': weight_close_loss,
             'depth_loss': depth_loss / (self.decay_rate ** divsor),
-            'flow_loss': flow_loss / (self.decay_rate ** divsor),
+            'flow_loss': flow_loss / (self.decay_rate ** divsor)
         }
-        self.count += 1
 
         return loss

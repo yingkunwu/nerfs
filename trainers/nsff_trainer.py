@@ -56,7 +56,7 @@ class NSFFTrainer(BaseTrainer):
 
         return embeddings, models
 
-    def forward(self, inputs):
+    def forward(self, inputs, step):
         """Do batched inference on rays using chunk."""
         rays, rays_t, max_t = inputs['rays'], inputs['rays_t'], inputs['max_t']
 
@@ -79,7 +79,7 @@ class NSFFTrainer(BaseTrainer):
         for k, v in results.items():
             results[k] = torch.cat(v, 0)
 
-        log = self.criterion(results, inputs)
+        log = self.criterion(results, inputs, step)
 
         return results, log
 
@@ -162,7 +162,7 @@ class NSFFTrainer(BaseTrainer):
             # advance the batch pointer
             self.optimizer.zero_grad()
 
-            results, log = self.forward(inputs)
+            results, log = self.forward(inputs, step)
 
             log['train/psnr'] = psnr(
                 results['rgb_map_ref'], inputs['rgbs'])
@@ -198,7 +198,7 @@ class NSFFTrainer(BaseTrainer):
                     inputs = self.extract_from_sample(sample)
                     inputs["max_t"] = max_t
 
-                    results, log = self.forward(inputs)
+                    results, log = self.forward(inputs, step)
 
                     log['val/psnr'] = psnr(
                         results['rgb_map_ref'], inputs['rgbs'])
