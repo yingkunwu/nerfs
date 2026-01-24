@@ -299,9 +299,10 @@ class NeRFTrainer(BaseTrainer):
             img = (img * 255).astype(np.uint8)
             depth = visualize_depth(results['depth_fine'].view(H, W))
             depth = depth.permute(1, 2, 0).numpy()
+            depth = (depth * 255).astype(np.uint8)
 
-            stack = np.concatenate([img, depth])
+            stack = np.concatenate([img, depth], axis=1)
             imgs += [stack]
-            imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), img)
+            imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
 
         imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)

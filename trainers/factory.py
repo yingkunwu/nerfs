@@ -151,4 +151,4 @@ class TrainerFactory:
             from trainers.nsff_trainer import NSFFTrainer
             return NSFFTrainer
         else:
-            raise ValueError(f"Unknown dataset type: {trainer_name}")
+            raise ValueError(f"Unknown trainer type: {trainer_name}")
