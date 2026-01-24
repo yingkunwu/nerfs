@@ -6,12 +6,8 @@ from utils.ray_utils import ndc2world
 
 
 class NSFFLoss(nn.Module):
-    def __init__(self, decay_iteration=30, lambda_geo=0.04, lambda_reg=0.1):
+    def __init__(self, decay_iteration=30):
         super().__init__()
-        self.lambda_geo_d = lambda_geo
-        self.lambda_geo_f = lambda_geo
-        self.lambda_reg = lambda_reg
-
         self.decay_iteration = decay_iteration
         self.decay_rate = 10
 
