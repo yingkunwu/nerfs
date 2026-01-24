@@ -33,7 +33,7 @@ def _reserve_version_dir(root: str):
 
 
 class BaseTrainer(ABC):
-    def __init__(self, cfg, log_dir):
+    def __init__(self, cfg, log_dir, create_log_folder=True):
         self.cfg = cfg
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -58,15 +58,16 @@ class BaseTrainer(ABC):
         )
 
         # Logging & output dirs
-        self.log_dir = _reserve_version_dir(log_dir)
-        os.makedirs(self.log_dir, exist_ok=True)
-        self.writer = SummaryWriter(self.log_dir)
-
-        self.save_vis_path = os.path.join(self.log_dir, "vis")
-        os.makedirs(self.save_vis_path, exist_ok=True)
-
-        f = os.path.join(self.log_dir, 'config.yaml')
-        OmegaConf.save(config=cfg, f=f)
+        if create_log_folder:
+            self.log_dir = _reserve_version_dir(log_dir)
+            os.makedirs(self.log_dir, exist_ok=True)
+            self.writer = SummaryWriter(self.log_dir)
+            self.save_vis_path = os.path.join(self.log_dir, "vis")
+            os.makedirs(self.save_vis_path, exist_ok=True)
+            f = os.path.join(self.log_dir, 'config.yaml')
+            OmegaConf.save(config=cfg, f=f)
+        else:
+            self.log_dir = log_dir
 
     @abstractmethod
     def create_nerf(self, cfg):
@@ -82,21 +83,30 @@ class BaseTrainer(ABC):
 
     def save_model(self):
         """
-        Save models into a single torch checkpoint.
+        Save models and embeddings into a single torch checkpoint.
         The checkpoint dict contains:
             - 'models': {name: state_dict}
+            - 'embeddings': {name: state_dict}
 
         Example load:
             ckpt = torch.load(path)
             for name, sd in ckpt['models'].items():
                 model = your_model_dict[name]
                 model.load_state_dict(sd)
+            for name, sd in ckpt['embeddings'].items():
+                embedding = your_embedding_dict[name]
+                embedding.load_state_dict(sd)
         """
         # Build checkpoint dict
         ckpt = {
             'models': {
                 name: model.state_dict()
                 for name, model in self.models.items()
+            },
+            'embeddings': {
+                name: embed.state_dict()
+                for name, embed in self.embeddings.items()
+                if isinstance(embed, torch.nn.Module)
             }
         }
 
@@ -104,6 +114,23 @@ class BaseTrainer(ABC):
         path = os.path.join(self.log_dir, "best.pth")
         # Save
         torch.save(ckpt, path)
+
+    def load_model(self, weight_path):
+        ckpt = torch.load(weight_path, map_location=self.device)
+        for name, model in self.models.items():
+            if name in ckpt['models']:
+                model.load_state_dict(ckpt['models'][name])
+            else:
+                raise KeyError(f"Model '{name}' not found in checkpoint.")
+        for name, embed in self.embeddings.items():
+            if not isinstance(embed, torch.nn.Module):
+                continue
+            if name in ckpt['embeddings']:
+                embed.load_state_dict(ckpt['embeddings'][name])
+            else:
+                raise KeyError(f"Embedding '{name}' not found in checkpoint.")
+
+        print("Model weight loaded successfully!")
 
 
 class TrainerFactory:

@@ -3,18 +3,21 @@ import torch
 from collections import defaultdict
 from torchvision.utils import save_image
 from tqdm import tqdm
+import numpy as np
+import imageio
 
 from .factory import BaseTrainer
 from models.nerf import NeRF, Embedding
 from losses.nerf_loss import NeRFLoss, DepthLoss
 from utils.nerf_rendering import render_rays
 from utils.metrics import psnr
-from utils.misc import visualize_depth
+from utils.misc import visualize_depth, create_spiral_poses
+from utils.ray_utils import get_ray_directions, get_rays, get_ndc_rays
 
 
 class NeRFTrainer(BaseTrainer):
-    def __init__(self, cfg, log_dir):
-        super().__init__(cfg, log_dir)
+    def __init__(self, cfg, **kwargs):
+        super().__init__(cfg, **kwargs)
         self.criterion = NeRFLoss()
         self.depth_loss = None
         if cfg.use_depth_loss:
@@ -57,7 +60,7 @@ class NeRFTrainer(BaseTrainer):
 
         return embeddings, models
 
-    def forward(self, inputs):
+    def forward(self, inputs, infer_only=False):
         """Do batched inference on rays using chunk."""
         rays = inputs['rays']
         rays_batch_size = rays.shape[0]
@@ -89,6 +92,9 @@ class NeRFTrainer(BaseTrainer):
 
         for k, v in results.items():
             results[k] = torch.cat(v, 0)
+
+        if infer_only:
+            return results
 
         depth_results = defaultdict(list)
         if self.depth_loss is not None:
@@ -251,3 +257,51 @@ class NeRFTrainer(BaseTrainer):
                     if log[f'val/psnr_{typ}'].item() > best_psnr:
                         self.save_model()
                         best_psnr = log[f'val/psnr_{typ}'].item()
+
+    def inference(self, val_dataset):
+        save_dir = os.path.join(self.log_dir, "inference")
+        os.makedirs(save_dir, exist_ok=True)
+
+        radii = np.percentile(np.abs(val_dataset.poses[..., 3]), 90, axis=0)
+        # hardcoded, this is numerically close to the formula
+        # given in the original repo. Mathematically if near=1
+        # and far=infinity, then this number will converge to 4
+        focus_depth = 3.5
+        poses = create_spiral_poses(radii, focus_depth)
+
+        W, H = val_dataset.img_wh
+        K = val_dataset.K
+        directions = get_ray_directions(H, W, K)
+
+        for m in self.models.values():
+            m.eval()
+
+        imgs = []
+        for i in tqdm(range(len(poses)), desc="Rendering spiral poses"):
+            c2w = torch.FloatTensor(poses[i])
+            rays_o, rays_d = get_rays(directions, c2w)
+            rays_o, rays_d = get_ndc_rays(K, 1.0, rays_o, rays_d)
+
+            near, far = 0, 1
+
+            near_ = near * torch.ones_like(rays_o[:, :1])
+            far_ = far * torch.ones_like(rays_o[:, :1])
+            rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
+
+            inputs = {
+                'rays': rays.to(self.device),
+                'pose': c2w.to(self.device)
+            }
+            with torch.no_grad():
+                results = self.forward(inputs, infer_only=True)
+
+            img = results['rgb_fine'].view(H, W, 3).cpu().numpy()
+            img = (img * 255).astype(np.uint8)
+            depth = visualize_depth(results['depth_fine'].view(H, W))
+            depth = depth.permute(1, 2, 0).numpy()
+
+            stack = np.concatenate([img, depth])
+            imgs += [stack]
+            imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), img)
+
+        imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
