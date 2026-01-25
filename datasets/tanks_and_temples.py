@@ -115,4 +115,5 @@ class TNTDataLoader(DataLoader):
             'rays': rays,
             'rgbs': img,
             'image_size': (new_h, new_w),
+            'intrinsics': K
         }

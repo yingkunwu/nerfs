@@ -3,19 +3,21 @@ import torch
 from collections import defaultdict
 from torchvision.utils import save_image
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor
+import numpy as np
+import imageio
 
 from .factory import BaseTrainer
 from models.nerf import NeRF, Embedding
 from losses.nerf_loss import NeRFLoss
 from utils.nerfplus_rendering import render_rays
 from utils.metrics import psnr
-from utils.misc import visualize_depth
+from utils.misc import visualize_depth, interpolate_waypoints
+from utils.ray_utils import get_ray_directions, get_rays
 
 
 class NeRFPlusPlusTrainer(BaseTrainer):
-    def __init__(self, cfg, log_dir):
-        super().__init__(cfg, log_dir)
+    def __init__(self, cfg, **kwargs):
+        super().__init__(cfg, **kwargs)
         self.criterion = NeRFLoss()
 
     def create_nerf(self, cfg):
@@ -227,3 +229,52 @@ class NeRFPlusPlusTrainer(BaseTrainer):
                     if log[f'val/psnr_{typ}'].item() > best_psnr:
                         self.save_model()
                         best_psnr = log[f'val/psnr_{typ}'].item()
+
+    def inference(self, val_dataset):
+        save_dir = os.path.join(self.log_dir, "inference")
+        os.makedirs(save_dir, exist_ok=True)
+
+        # dummy sample
+        sample = val_dataset.sample(0)
+        H, W = sample['image_size']
+        K = sample['intrinsics']
+        directions = get_ray_directions(H, W, K)
+
+        for m in self.models.values():
+            m.eval()
+
+        # prepare poses
+        poses = []
+        for i in range(10):
+            sample = val_dataset.sample(20 + i)
+            poses.append(sample['pose'])
+        poses = torch.stack(poses, dim=0)
+
+        Rs, ts = interpolate_waypoints(poses[:, :3, :3], poses[:, :3, 3:])
+        poses = np.tile(np.eye(4), (len(Rs), 1, 1))
+        poses[:, :3, :3] = Rs
+        poses[:, :3, 3] = ts
+
+        imgs = []
+        for i in tqdm(range(len(poses)), desc="Rendering spherical poses"):
+            c2w = torch.FloatTensor(poses[i])[:3]
+            rays_o, rays_d = get_rays(directions, c2w)
+            near = 0.01 * torch.ones_like(rays_o[:, :1])
+            far = 1 * torch.ones_like(rays_o[:, :1])
+            rays = torch.cat([rays_o, rays_d, near, far], dim=1)
+
+            inputs = {'rays': rays.to(self.device)}
+            with torch.no_grad():
+                results = self.forward(inputs)
+
+            img = results['rgb_fine'].view(H, W, 3).cpu().numpy()
+            img = (img * 255).astype(np.uint8)
+            depth = visualize_depth(results['depth_fine'].view(H, W))
+            depth = depth.permute(1, 2, 0).numpy()
+            depth = (depth * 255).astype(np.uint8)
+
+            stack = np.concatenate([img, depth], axis=1)
+            imgs += [stack]
+            imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
+
+        imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
