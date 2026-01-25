@@ -245,12 +245,13 @@ class NeRFPlusPlusTrainer(BaseTrainer):
 
         # prepare poses
         poses = []
-        for i in range(10):
+        for i in range(5):
             sample = val_dataset.sample(20 + i)
             poses.append(sample['pose'])
         poses = torch.stack(poses, dim=0)
 
-        Rs, ts = interpolate_waypoints(poses[:, :3, :3], poses[:, :3, 3:])
+        Rs, ts = interpolate_waypoints(
+            poses[:, :3, :3], poses[:, :3, 3:], steps=80)
         poses = np.tile(np.eye(4), (len(Rs), 1, 1))
         poses[:, :3, :3] = Rs
         poses[:, :3, 3] = ts
