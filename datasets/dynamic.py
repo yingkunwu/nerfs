@@ -41,7 +41,7 @@ class DynamicDataLoader(DataLoader):
     def _resize_intrinsics(self, K, orig_hw):
         """Downscale intrinsics to match self.resolution (integer factor)."""
         h0, w0 = orig_hw
-        if self.resolution <= 1:
+        if self.resolution >= 1:
             return K.astype(np.float32), (h0, w0)
         new_h = int(h0 * self.resolution)
         new_w = int(w0 * self.resolution)

@@ -3,19 +3,22 @@ import torch
 from collections import defaultdict
 from torchvision.utils import save_image
 from tqdm import tqdm
+import numpy as np
+import imageio
 from concurrent.futures import ThreadPoolExecutor
 
 from .factory import BaseTrainer
 from models.nsff import NeRF_Static, NeRF_Dynamic, Embedding
 from losses.nsff_loss import NSFFLoss
-from utils.nsff_rendering import render_rays
+from utils.nsff_rendering import render_rays, interpolate
 from utils.metrics import psnr
-from utils.misc import visualize_depth
+from utils.ray_utils import get_ray_directions, get_rays, get_ndc_rays
+from utils.misc import visualize_depth, create_spiral_poses_from_pose
 
 
 class NSFFTrainer(BaseTrainer):
-    def __init__(self, cfg, log_dir):
-        super().__init__(cfg, log_dir)
+    def __init__(self, cfg, **kwargs):
+        super().__init__(cfg, **kwargs)
         self.criterion = NSFFLoss()
 
     def create_nerf(self, cfg):
@@ -56,7 +59,7 @@ class NSFFTrainer(BaseTrainer):
 
         return embeddings, models
 
-    def forward(self, inputs, step):
+    def forward(self, inputs, step, infer_only=False):
         """Do batched inference on rays using chunk."""
         rays, rays_t, max_t = inputs['rays'], inputs['rays_t'], inputs['max_t']
 
@@ -78,6 +81,9 @@ class NSFFTrainer(BaseTrainer):
 
         for k, v in results.items():
             results[k] = torch.cat(v, 0)
+
+        if infer_only:
+            return results
 
         log = self.criterion(results, inputs, step)
 
@@ -138,8 +144,9 @@ class NSFFTrainer(BaseTrainer):
             def get_sample():
                 return train_dataset.sample(shuffle=True)
 
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                samples = list(executor.map(lambda _: get_sample(), range(2)))
+            # you can increase the number of workers if memory allows
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                samples = list(executor.map(lambda _: get_sample(), range(8)))
 
             # a list of 16 sampled batches
             sample = {}
@@ -239,3 +246,76 @@ class NSFFTrainer(BaseTrainer):
                         # save model weight
                         self.save_model()
                         best_psnr = log['val/psnr'].item()
+
+    def inference(self, val_dataset):
+        save_dir = os.path.join(self.log_dir, "inference")
+        os.makedirs(save_dir, exist_ok=True)
+
+        max_trans = np.percentile(
+            np.abs(np.diff(val_dataset.poses[:, 0, 3])), 10)
+        radii = np.array([max_trans, max_trans, 0])
+        poses = create_spiral_poses_from_pose(
+            val_dataset.poses, radii, n_poses=6 * len(val_dataset))
+
+        W, H = val_dataset.img_wh
+        K = torch.FloatTensor(val_dataset.K)
+        directions = get_ray_directions(H, W, K)
+
+        for m in self.models.values():
+            m.eval()
+
+        imgs = []
+        total = np.linspace(
+            0, len(val_dataset) - 1, 6 * len(val_dataset)
+        ).tolist()[:-1]
+        for i, cur_time in tqdm(enumerate(total),
+                                total=len(total),
+                                desc="Rendering spiral poses"):
+            flow_time = int(np.floor(cur_time))
+            dt = cur_time - np.floor(cur_time)
+
+            c2w = torch.FloatTensor(poses[i])
+            rays_o, rays_d = get_rays(directions, c2w)
+            rays_o, rays_d = get_ndc_rays(K, 1.0, rays_o, rays_d)
+
+            near, far = 0, 1
+
+            near_ = near * torch.ones_like(rays_o[:, :1])
+            far_ = far * torch.ones_like(rays_o[:, :1])
+            rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
+            rays_t = flow_time * torch.ones(len(rays_o), dtype=torch.long)
+
+            inputs = {
+                'rays': rays.to(self.device),
+                "rays_t": rays_t.to(self.device),
+                "max_t": len(val_dataset)
+            }
+            with torch.no_grad():
+                results = self.forward(inputs, i, infer_only=True)
+
+            inputs['rays_t'] += 1
+            with torch.no_grad():
+                results_tp1 = self.forward(inputs, i, infer_only=True)
+
+            img, depth = interpolate(
+                results,
+                results_tp1,
+                dt,
+                K.to(self.device),
+                c2w.to(self.device),
+                val_dataset.img_wh)
+
+            img = torch.clip(img, 0, 1)
+            img = (img.numpy() * 255).astype(np.uint8)
+            depth = visualize_depth(depth.view(H, W))
+            depth = depth.permute(1, 2, 0).numpy()
+            depth = (depth * 255).astype(np.uint8)
+
+            stack = np.concatenate([img, depth], axis=1)
+            imgs += [stack]
+            imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
+
+            del results
+            del results_tp1
+
+        imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)

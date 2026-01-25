@@ -2,7 +2,8 @@ import torch
 import torch.nn.functional as F
 from einops import repeat, rearrange
 
-from utils.ray_utils import perturb_samples
+from utils.ray_utils import perturb_samples, create_meshgrid, ndc2world
+from utils.softsplat import FunctionSoftsplat
 
 
 def compute_deltas(z_vals, rays_d):
@@ -45,6 +46,7 @@ def raw2outputs(
     return {
         "rgb_map": rgb_map,
         "depth_map": depth_map,
+        "alphas": alphas,
         "weights": weights
     }
 
@@ -241,7 +243,8 @@ def inference_blending(
                 results_dy['weights'][..., None] * xyz_fw, dim=-2),
             'raw_xyz_bw': xyz_bw,
             'raw_xyz_fw': xyz_fw,
-            'raw_pts_ref': xyz
+            'raw_pts_ref': xyz,
+            'raw_zs': z_vals
         }
 
     return {
@@ -249,6 +252,9 @@ def inference_blending(
         'depth_map': depth_map_ref,
         'rgb_map_dy': results_dy['rgb_map'],
         'depth_map_dy': results_dy['depth_map'],
+        'blend_w': blend_w,
+        'raw_rgb_dy': rgb_dy,
+        'alphas_dy': alpha_dy,
         **res_warp
     }
 
@@ -316,5 +322,136 @@ def render_rays(
         'xyz_fw': blending_results['xyz_fw'],
         'raw_xyz_bw': blending_results['raw_xyz_bw'],
         'raw_xyz_fw': blending_results['raw_xyz_fw'],
-        'raw_pts_ref': blending_results['raw_pts_ref']
+        'raw_pts_ref': blending_results['raw_pts_ref'],
+        'raw_zs': blending_results['raw_zs'],
+        'blend_w': blending_results['blend_w'],
+        # the following are used for interpolation (inference only)
+        'raw_rgb_static': static_raw[..., :3].detach().cpu(),
+        'alphas_static': static_results['alphas'].detach().cpu(),
+        'raw_rgb_dy': blending_results['raw_rgb_dy'].detach().cpu(),
+        'alphas_dynamic': blending_results['alphas_dy'].detach().cpu()
     }
+
+
+def interpolate(results_t, results_tp1, dt, K, c2w, img_wh):
+    """
+    Interpolate between two results t and t+1 to produce t+dt, dt in (0, 1).
+    For each sample on the ray (the sample points lie on the same distances,
+    so they actually form planes), compute the optical flow on this plane,
+    then use softsplat to splat the flows. Finally use MPI technique to compute
+    the composite image. Used in test time only.
+
+    Inputs:
+        results_t, results_tp1: dictionaries of the @render_rays function.
+        dt: float in (0, 1)
+        K: (3, 3)
+            intrinsics matrix (MUST BE THE SAME for results_t and results_tp1!)
+        c2w: (3, 4)
+            current pose (MUST BE THE SAME for results_t and results_tp1!)
+        img_wh: image width and height
+
+    Outputs:
+        (img_wh[1], img_wh[0], 3) rgb interpolation result
+        (img_wh[1], img_wh[0]) depth of the interpolation (in NDC)
+    """
+    device = results_t['raw_pts_ref'].device
+    N_rays, N_samples = results_t['raw_pts_ref'].shape[:2]
+
+    w, h = img_wh
+    c2w_ = torch.eye(4, device=device)
+    c2w_[:3] = c2w
+    w2c = torch.inverse(c2w_)[:3]
+    w2c[1:] *= -1  # "right up back" to "right down forward" for cam projection
+    P = K @ w2c  # (3, 4) projection matrix
+    grid = create_meshgrid(h, w, normalized_coordinates=False).to(device)
+
+    xyzs = results_t['raw_pts_ref']
+    xyzs_w = ndc2world(rearrange(xyzs, 'n1 n2 c -> (n1 n2) c'), K)
+
+    # static buffers
+    static_rgb = rearrange(results_t['raw_rgb_static'],
+                           '(h w) n2 c -> h w n2 c', w=w, h=h, c=3)
+    static_a = rearrange(results_t['alphas_static'],
+                         '(h w) n2 -> h w n2 1', w=w, h=h)
+    blend_w = results_t['blend_w'].cpu()
+    blend_w = rearrange(blend_w, '(h w) n2 -> h w n2 1', w=w, h=h)
+    static_a = static_a * (1.0 - blend_w)
+    blend_w = rearrange(blend_w, 'h w n2 1 -> n2 1 h w')
+
+    # compute forward buffers
+    xyzs_fw_w = ndc2world(
+        rearrange(results_t['raw_xyz_fw'], 'n1 n2 c -> (n1 n2) c'), K)
+    xyzs_fw_w = xyzs_w + dt * (xyzs_fw_w - xyzs_w)  # scale the flow with dt
+    uvds_fw = P[:3, :3] @ rearrange(xyzs_fw_w, 'n c -> c n') + P[:3, 3:]
+    uvs_fw = uvds_fw[:2] / uvds_fw[2]
+    uvs_fw = rearrange(uvs_fw, 'c (n1 n2) -> c n1 n2', n1=N_rays, n2=N_samples)
+    uvs_fw = rearrange(uvs_fw, 'c (h w) n2 -> n2 h w c', w=w, h=h)
+    of_fw = rearrange(uvs_fw - grid, 'n2 h w c -> n2 c h w', c=2)
+
+    transient_rgb_t = rearrange(results_t['raw_rgb_dy'],
+                                '(h w) n2 c -> n2 c h w', w=w, h=h, c=3)
+    transient_a_t = rearrange(results_t['alphas_dynamic'],
+                              '(h w) n2 -> n2 1 h w', w=w, h=h)
+    transient_rgba_t = torch.cat(
+        [transient_rgb_t, transient_a_t * blend_w], 1)
+
+    # compute backward buffers
+    xyzs_bw_w = ndc2world(
+        rearrange(results_tp1['raw_xyz_bw'], 'n1 n2 c -> (n1 n2) c'), K)
+    xyzs_bw_w = xyzs_w + (1 - dt) * (xyzs_bw_w - xyzs_w)
+    uvds_bw = P[:3, :3] @ rearrange(xyzs_bw_w, 'n c -> c n') + P[:3, 3:]
+    uvs_bw = uvds_bw[:2] / uvds_bw[2]
+    uvs_bw = rearrange(uvs_bw, 'c (n1 n2) -> c n1 n2', n1=N_rays, n2=N_samples)
+    uvs_bw = rearrange(uvs_bw, 'c (h w) n2 -> n2 h w c', w=w, h=h)
+    of_bw = rearrange(uvs_bw - grid, 'n2 h w c -> n2 c h w', c=2)
+
+    transient_rgb_tp1 = rearrange(results_tp1['raw_rgb_dy'],
+                                  '(h w) n2 c -> n2 c h w', w=w, h=h, c=3)
+    transient_a_tp1 = rearrange(results_tp1['alphas_dynamic'],
+                                '(h w) n2 -> n2 1 h w', w=w, h=h)
+    transient_rgba_tp1 = torch.cat(
+        [transient_rgb_tp1, transient_a_tp1 * blend_w], 1)
+
+    T_i = torch.ones((h, w, 1))
+    rgb = torch.zeros((h, w, 3))
+    depth = torch.zeros((h, w))
+    zs = results_t['raw_zs']
+    zs = rearrange(zs, '(h w) n -> h w n', w=w, h=h).cpu()
+
+    for s in range(N_samples):  # compute MPI planes
+        transient_rgba_fw = FunctionSoftsplat(
+            tenInput=transient_rgba_t[s:s+1].to(device).contiguous(),
+            tenFlow=of_fw[s:s+1].contiguous(),
+            tenMetric=None,
+            strType='average').cpu()
+        transient_rgba_fw = rearrange(transient_rgba_fw, '1 c h w -> h w c')
+
+        transient_rgba_bw = FunctionSoftsplat(
+            tenInput=transient_rgba_tp1[s:s+1].to(device).contiguous(),
+            tenFlow=of_bw[s:s+1].contiguous(),
+            tenMetric=None,
+            strType='average').cpu()
+        transient_rgba_bw = rearrange(transient_rgba_bw, '1 c h w -> h w c')
+
+        rgb += T_i * (
+            transient_rgba_fw[..., 3:] * transient_rgba_fw[..., :3]
+            + static_a[:, :, s] * static_rgb[:, :, s]
+        ) * (1.0 - dt)
+        rgb += T_i * (
+            transient_rgba_bw[..., 3:] * transient_rgba_bw[..., :3]
+            + static_a[:, :, s] * static_rgb[:, :, s]
+        ) * dt
+
+        depth += T_i[..., 0] * zs[:, :, s]
+
+        alpha1 = (
+            1.0 - (1. - transient_rgba_fw[..., 3:]) * (1. - static_a[:, :, s])
+        ) * (1. - dt)
+        alpha2 = (
+            1.0 - (1. - transient_rgba_bw[..., 3:]) * (1. - static_a[:, :, s])
+        ) * dt
+        alpha = alpha1 + alpha2
+
+        T_i = T_i * (1.0 - alpha + 1e-10)
+
+    return rgb, depth

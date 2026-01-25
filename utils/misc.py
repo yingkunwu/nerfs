@@ -3,6 +3,8 @@ import torch
 import numpy as np
 from PIL import Image, ImageDraw
 import torchvision.transforms as T
+from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Slerp
 
 from .colmap_utils import normalize
 
@@ -107,5 +109,54 @@ def create_spiral_poses(radii, focus_depth, n_poses=120):
         y = np.cross(z, x)  # (3)
 
         poses_spiral += [np.stack([x, y, z, center], 1)]  # (3, 4)
+
+    return np.stack(poses_spiral, 0)  # (n_poses, 3, 4)
+
+
+def create_spiral_poses_from_pose(original_poses, radii, n_poses=120):
+    """
+    Create spiral poses around given poses for novel view rendering purpose.
+
+    Inputs:
+        original_poses: (N_frames, 3, 4)
+            original poses around which to generate the spiral.
+        radii: (3)
+            radii of the spiral for each axis (only x, y are used)
+        n_poses: int
+            number of poses to create
+
+    Outputs:
+        poses_spiral: (n_poses, 3, 4) the poses in the spiral path
+    """
+    N_frames = len(original_poses)
+    # interpolation rotations
+    rot_slerp = Slerp(
+        range(N_frames),
+        R.from_matrix(original_poses[..., :3])
+    )
+    interp_rots = rot_slerp(
+        np.linspace(0, N_frames - 1, n_poses + 1)
+    )[:-1]
+    interp_rots = interp_rots.as_matrix()
+    # interpolation positions
+    interp_xyzs = np.stack([
+        np.interp(
+            np.linspace(0, N_frames - 1, n_poses + 1)[:-1],
+            range(N_frames),
+            original_poses[:, i, 3]
+        ) for i in range(3)
+    ], -1)
+
+    poses_spiral = []
+    for i, t in enumerate(
+        np.linspace(0, 8 * np.pi, n_poses + 1)[:-1]
+    ):  # rotate 8pi (4 rounds)
+        pose = np.zeros((3, 4))
+        pose[:, :3] = interp_rots[i]
+        pose[:, 3] = (
+            interp_xyzs[i] +
+            radii * np.array([np.cos(t), -np.sin(t), 0])
+        )
+        poses_spiral.append(pose)
 
     return np.stack(poses_spiral, 0)  # (n_poses, 3, 4)

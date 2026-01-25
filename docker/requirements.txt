@@ -12,3 +12,5 @@ trimesh
 open3d
 scipy
 omegaconf
+imageio
+cupy-cuda12x
