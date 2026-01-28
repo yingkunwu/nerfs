@@ -71,10 +71,8 @@ class NeRF_Static(nn.Module):
         self.xyz_final = nn.Linear(width, width)
 
         # outputs
-        self.sigma = nn.Sequential(
-            nn.Linear(width, 1),
-            nn.Softplus()
-        )
+        self.sigma = nn.Linear(width, 1)
+        nn.init.constant_(self.sigma.bias, 0.1)
         self.rgb = nn.Sequential(
             nn.Linear(width + in_ch_dir, width // 2),
             nn.ReLU(inplace=True),
@@ -146,10 +144,8 @@ class NeRF_Dynamic(nn.Module):
         self.xyz_final = nn.Linear(width, width)
 
         # outputs
-        self.sigma = nn.Sequential(
-            nn.Linear(width, 1),
-            nn.Softplus()
-        )
+        self.sigma = nn.Linear(width, 1)
+        nn.init.constant_(self.sigma.bias, 0.1)
         self.rgb = nn.Sequential(
             nn.Linear(width + in_ch_dir, width // 2),
             nn.ReLU(inplace=True),

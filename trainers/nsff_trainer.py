@@ -14,6 +14,7 @@ from utils.nsff_rendering import render_rays, interpolate
 from utils.metrics import psnr
 from utils.ray_utils import get_ray_directions, get_rays, get_ndc_rays
 from utils.misc import visualize_depth, create_spiral_poses_from_pose
+from utils.flowlib import flow_to_image
 
 
 class NSFFTrainer(BaseTrainer):
@@ -93,9 +94,10 @@ class NSFFTrainer(BaseTrainer):
         rays = sample['rays'].to(self.device)  # [N_rays, 6]
         rays_t = sample['rays_t'].to(self.device)  # [N_rays,]
         rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
-        disp = sample['disp'].to(self.device)  # [N_rays,]
+        depth = sample['depth'].to(self.device)  # [N_rays,]
         uv_fw = sample['uv_fw'].to(self.device)  # [N_rays, 2]
         uv_bw = sample['uv_bw'].to(self.device)  # [N_rays, 2]
+        uv = sample['uv'].to(self.device)  # [N_rays, 2]
 
         # all the data share the same camera intrinsics and extrinsics
         if isinstance(sample['Ks'], list):
@@ -115,17 +117,19 @@ class NSFFTrainer(BaseTrainer):
             rays = rays[idx]
             rays_t = rays_t[idx]
             rgbs = rgbs[idx]
-            disp = disp[idx]
+            depth = depth[idx]
             uv_fw = uv_fw[idx]
             uv_bw = uv_bw[idx]
+            uv = uv[idx]
 
         inputs = {
             "rays": rays,
             "rays_t": rays_t,
             "rgbs": rgbs,
-            "disp": disp,
+            "depth": depth,
             "uv_fw": uv_fw,
             "uv_bw": uv_bw,
+            "uv": uv,
             'Ks': Ks,
             'Ps': Ps
         }
@@ -227,20 +231,44 @@ class NSFFTrainer(BaseTrainer):
                     img_gt = sample['rgbs']\
                         .view(H, W, 3).permute(2, 0, 1).cpu()
 
+                    depth_gt = visualize_depth(inputs['depth'].view(H, W))
                     depth = visualize_depth(
-                        results['depth_map_ref'].view(H, W))
+                        -results['depth_map_ref'].view(H, W))
+                    depth_rig = visualize_depth(
+                        -results['depth_map_static'].view(H, W))
                     depth_dy = visualize_depth(
-                        results['depth_map_ref_dynamic'].view(H, W))
+                        -results['depth_map_ref_dynamic'].view(H, W))
 
-                    # Create a 2x3 grid
-                    row1 = torch.cat([img_rgb, img_rgb_rig, img_rgb_dy], -1)
-                    row2 = torch.cat([depth, depth_dy, img_gt], -1)
+                    # Create a 2x4 grid
+                    row1 = torch.cat(
+                        [img_gt, img_rgb, img_rgb_rig, img_rgb_dy], -1)
+                    row2 = torch.cat(
+                        [depth_gt, depth, depth_rig, depth_dy], -1)
                     grid = torch.cat([row1, row2], -2)
                     self.writer.add_image('val/visualization', grid, step)
 
                     save_name = os.path.join(
                         self.save_vis_path, f'val_{step:06d}.png')
-                    save_image(grid, save_name, nrow=3)
+                    save_image(grid, save_name, nrow=2)
+
+                    def get_img(target):
+                        diff = (target - inputs['uv']).view(H, W, 2)
+                        return flow_to_image(diff.cpu().numpy())
+
+                    flow_fw_gt = get_img(inputs['uv_fw'])
+                    flow_bw_gt = get_img(inputs['uv_bw'])
+                    flow_fw_pred = get_img(results['uv_fw'])
+                    flow_bw_pred = get_img(results['uv_bw'])
+
+                    grid_np = np.stack([
+                        flow_fw_gt, flow_bw_gt, flow_fw_pred, flow_bw_pred])
+                    grid_tensor = \
+                        torch.from_numpy(grid_np).permute(0, 3, 1, 2).float()
+                    if grid_tensor.max() > 1.0:
+                        grid_tensor /= 255.0
+                    save_name = os.path.join(
+                        self.save_vis_path, f'flow_{step:06d}.png')
+                    save_image(grid_tensor, save_name, nrow=2)
 
                     if log['val/psnr'].item() > best_psnr:
                         # save model weight

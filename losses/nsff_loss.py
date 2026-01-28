@@ -6,7 +6,7 @@ from utils.ray_utils import ndc2world
 
 
 class NSFFLoss(nn.Module):
-    def __init__(self, decay_iteration=30):
+    def __init__(self, decay_iteration=50):
         super().__init__()
         self.decay_iteration = decay_iteration
         self.decay_rate = 10
@@ -14,12 +14,25 @@ class NSFFLoss(nn.Module):
     def forward(self, inputs, targets, global_step):
         # photo consistency loss
         render_loss = compute_mse(inputs['rgb_map_ref'], targets["rgbs"])
-        render_loss += compute_mse(inputs['rgb_bw'],
-                                   targets["rgbs"],
-                                   inputs["prob_ref2prev"].unsqueeze(-1))
-        render_loss += compute_mse(inputs['rgb_fw'],
-                                   targets["rgbs"],
-                                   inputs["prob_ref2post"].unsqueeze(-1))
+        if global_step <= self.decay_iteration * 1000:
+            render_loss += compute_mse(
+                inputs['rgb_map_ref_dynamic'], targets["rgbs"])
+            render_loss += compute_mse(
+                inputs['rgb_bw'], targets["rgbs"],
+                inputs["prob_ref2prev"].unsqueeze(-1))
+            render_loss += compute_mse(
+                inputs['rgb_fw'], targets["rgbs"],
+                inputs["prob_ref2post"].unsqueeze(-1))
+        else:
+            weights_map_dy = inputs['weights_map_dy'].unsqueeze(-1)
+            render_loss += compute_mse(
+                inputs['rgb_map_ref_dynamic'], targets["rgbs"], weights_map_dy)
+            render_loss += compute_mse(
+                inputs['rgb_bw'], targets["rgbs"],
+                inputs["prob_ref2prev"].unsqueeze(-1) * weights_map_dy)
+            render_loss += compute_mse(
+                inputs['rgb_fw'], targets["rgbs"],
+                inputs["prob_ref2post"].unsqueeze(-1) * weights_map_dy)
 
         # cycle consistency loss
         sf_cycle_loss = 0.1 * compute_mae(
@@ -50,10 +63,6 @@ class NSFFLoss(nn.Module):
         reg_temp_sm_loss = 0.1 * torch.mean(
             torch.abs(xyzs_fw_w + xyzs_bw_w - 2 * xyzs_w))
 
-        # min (encourage scene flow to be minimal in most of 3D space)
-        reg_min_loss = 0.1 * torch.mean(
-            torch.abs(xyzs_fw_w - xyzs_w) + torch.abs(xyzs_bw_w - xyzs_w))
-
         # spacial smoothness
         d = torch.norm(xyzs_w[:, 1:] - xyzs_w[:, :-1], dim=-1, keepdim=True)
         sp_w = torch.exp(-2 * d)  # weight decreases as the distance increases
@@ -63,9 +72,15 @@ class NSFFLoss(nn.Module):
             torch.abs(sf_fw_w[:, 1:] - sf_fw_w[:, :-1]) * sp_w
             + torch.abs(sf_bw_w[:, 1:] - sf_bw_w[:, :-1]) * sp_w)
 
+        # min (encourage scene flow to be minimal in most of 3D space)
+        reg_min_loss = 0.1 * (
+            torch.mean(torch.abs(inputs['sf_ref2prev_weighted']))
+            + torch.mean(torch.abs(inputs['sf_ref2post_weighted']))
+        )
+
         # scale-invariant depth loss
         depth_loss = 0.04 * compute_depth_loss(
-            inputs['depth_map_ref'], -targets["disp"])
+            inputs['depth_map_ref_dynamic'], -targets["depth"])
 
         # scene flow loss
         max_t = targets['max_t']
@@ -84,7 +99,7 @@ class NSFFLoss(nn.Module):
 
         # disable geo loss for the first and last frames (no gt for fw/bw)
         # also projected depth must > 0 (must be in front of the camera)
-        valid_geo_fw = (uvd_fw[:, 2, 0] > 0) & (targets['rays_t'] <= max_t - 1)
+        valid_geo_fw = (uvd_fw[:, 2, 0] > 0) & (targets['rays_t'] < max_t - 1)
         valid_geo_bw = (uvd_bw[:, 2, 0] > 0) & (targets['rays_t'] > 0)
 
         flow_loss = torch.tensor(0.0, device=uv_fw.device)
@@ -94,6 +109,10 @@ class NSFFLoss(nn.Module):
         if valid_geo_bw.any():
             flow_loss += 0.02 * compute_mae(uv_bw[valid_geo_bw],
                                             targets['uv_bw'][valid_geo_bw])
+
+        # add this for debugging
+        inputs['uv_fw'] = uv_fw
+        inputs['uv_bw'] = uv_bw
 
         divsor = global_step // (self.decay_iteration * 1000)
 

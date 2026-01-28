@@ -229,6 +229,10 @@ def inference_blending(
             'sf_ref2post': sf_ref2post,
             'sf_prev2ref': sf_prev2ref,
             'sf_post2ref': sf_post2ref,
+            'sf_ref2prev_weighted': torch.sum(
+                results_dy['weights'][..., None] * sf_ref2prev, dim=-1),
+            'sf_ref2post_weighted': torch.sum(
+                results_dy['weights'][..., None] * sf_ref2post, dim=-1),
             'raw_prob_ref2prev': raw_prob_ref2prev,
             'raw_prob_ref2post': raw_prob_ref2post,
             'prob_ref2prev': torch.sum(
@@ -255,6 +259,8 @@ def inference_blending(
         'blend_w': blend_w,
         'raw_rgb_dy': rgb_dy,
         'alphas_dy': alpha_dy,
+        # used as dynamic mask in loss computation
+        'weights_map_dy': torch.sum(weights_dy, -1).detach(),
         **res_warp
     }
 
@@ -318,6 +324,8 @@ def render_rays(
         'raw_sf_post2ref': blending_results['sf_post2ref'],
         'raw_prob_ref2prev': blending_results['raw_prob_ref2prev'],
         'raw_prob_ref2post': blending_results['raw_prob_ref2post'],
+        'sf_ref2prev_weighted': blending_results['sf_ref2prev_weighted'],
+        'sf_ref2post_weighted': blending_results['sf_ref2post_weighted'],
         'xyz_bw': blending_results['xyz_bw'],
         'xyz_fw': blending_results['xyz_fw'],
         'raw_xyz_bw': blending_results['raw_xyz_bw'],
@@ -325,6 +333,7 @@ def render_rays(
         'raw_pts_ref': blending_results['raw_pts_ref'],
         'raw_zs': blending_results['raw_zs'],
         'blend_w': blending_results['blend_w'],
+        'weights_map_dy': blending_results['weights_map_dy'],
         # the following are used for interpolation (inference only)
         'raw_rgb_static': static_raw[..., :3].detach().cpu(),
         'alphas_static': static_results['alphas'].detach().cpu(),

@@ -55,7 +55,8 @@ class DynamicDataLoader(DataLoader):
     def read_meta(self):
         # read inputs
         self.image_paths = sorted(
-            glob.glob(os.path.join(self.root_dir, 'images/*'))
+            glob.glob(os.path.join(
+                self.root_dir, 'images_undistorted/images/*'))
         )[self.start_frame:self.end_frame]
         self.disp_paths = sorted(
             glob.glob(os.path.join(self.root_dir, 'disps/*'))
@@ -127,6 +128,7 @@ class DynamicDataLoader(DataLoader):
                 self.disp_paths[i], cv2.IMREAD_ANYDEPTH).astype(np.float32)
             disp = cv2.resize(
                 disp, self.img_wh, interpolation=cv2.INTER_NEAREST)
+            # what we read from file is actually depth
 
             pts_xyz = pts_w[0]  # (3, N_points)
             ones_row = np.ones((1, pts_xyz.shape[1]))  # (1, N_points)
@@ -142,39 +144,42 @@ class DynamicDataLoader(DataLoader):
             pts_uv_v[:, 1] = np.clip(pts_uv_v[:, 1], 0, self.img_wh[1] - 1)
             pts_d_v = pts_uvd_v[2]
 
-            # disp = a * (1 / z) + b -> solve a and b
+            # d1 = a * d0 + b -> solve a and b
             # use this regression to estimate the scale and shift of monodepth
             # predictions
             try:
                 y_vals = disp[pts_uv_v[:, 1], pts_uv_v[:, 0]]
-                x_vals = 1 / pts_d_v
+                x_vals = pts_d_v
                 reg = linregress(x_vals, y_vals)
             except Exception:
                 reg = None
 
             if reg is not None and reg.rvalue ** 2 > 0.9:
-                # z = a / (disp - b)
+                # d0 = (d1 - b) / d1
                 d = np.percentile(disp, 95)
-                scale_est = reg.slope / (d - reg.intercept)
+                scale_est = (d - reg.intercept) / reg.slope
                 min_depth = min(min_depth, scale_est)
             else:
                 min_depth = min(min_depth, np.percentile(pts_d_v, 5))
 
-        # correct poses
         # change "right down front" of COLMAP to "right up back"
         self.poses = np.concatenate(
             [poses[..., 0:1], -poses[..., 1:3], poses[..., 3:4]], -1)
+
+        # recenter poses
         self.poses = center_poses(self.poses)
 
         # correct scale so that the nearest depth is at a little more than 1.0
         self.scale_factor = min_depth * 0.75
-        self.poses[..., 3] /= self.scale_factor
+        poses[..., 3] /= self.scale_factor
 
         # create projection matrix, used to compute optical flow
         bottom = np.zeros((self.N_frames, 1, 4))
         bottom[..., -1] = 1
         rt = np.linalg.inv(np.concatenate([self.poses, bottom], 1))[:, :3]
-        rt[:, 1:] *= -1  # change to "right up back"
+        rt[:, 1:] *= -1  # change back to c2w under opencv coordinate system
+        # Since we are comparing optical flow on the opencv coordinate system,
+        # we require the opencv representations for world2camera projection.
 
         self.Ps = self.K @ rt
         self.Ps = torch.from_numpy(self.Ps).to(torch.float32)
@@ -226,7 +231,7 @@ class DynamicDataLoader(DataLoader):
         disp = cv2.imread(
             self.disp_paths[i], cv2.IMREAD_ANYDEPTH).astype(np.float32)
         disp = cv2.resize(disp, self.img_wh, interpolation=cv2.INTER_NEAREST)
-        sample['disp'] = torch.from_numpy(disp.flatten())
+        sample['depth'] = torch.from_numpy(disp.flatten())
 
         if i < self.N_frames - 1:
             flow_fw = read_flow(self.flow_fw_paths[i])
@@ -253,5 +258,6 @@ class DynamicDataLoader(DataLoader):
         sample['Ks'] = self.Ks.clone()
         sample['Ps'] = self.Ps.clone()
         sample['image_size'] = (self.img_wh[1], self.img_wh[0])
+        sample['uv'] = self.uv.view(self.img_wh[1] * self.img_wh[0], 2)
 
         return sample
