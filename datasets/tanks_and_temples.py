@@ -84,8 +84,8 @@ class TNTDataLoader(DataLoader):
         extrinsics = self._parse_txt(self.extrinsics_files[i])
         # w2c is the camera extrinsic matrix
         w2c = torch.from_numpy(extrinsics).float()
-        c2w = torch.linalg.inv(w2c)
-        c2w = convert_pose(c2w)[:3]
+        c2w = torch.linalg.inv(w2c)[:3]
+        c2w[..., 1:3] *= -1
 
         img = Image.open(self.img_files[i])
         w, h = img.size  # PIL: (width, height)
