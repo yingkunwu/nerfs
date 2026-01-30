@@ -119,16 +119,39 @@ class BaseTrainer(ABC):
         ckpt = torch.load(weight_path, map_location=self.device)
         for name, model in self.models.items():
             if name in ckpt['models']:
-                model.load_state_dict(ckpt['models'][name])
+                try:
+                    missing, unexpected = model.load_state_dict(
+                        ckpt['models'][name], strict=True)
+                except RuntimeError as e:
+                    print("Warning: Ignore loading model "
+                          f"{name} due to size mismatch."
+                          f"\nActual Error message: {e}")
+                    continue
             else:
                 raise KeyError(f"Model '{name}' not found in checkpoint.")
+            if missing:
+                print(f"Model '{name}' missing keys: {missing}")
+            if unexpected:
+                print(f"Model '{name}' unexpected keys: {unexpected}")
+
         for name, embed in self.embeddings.items():
             if not isinstance(embed, torch.nn.Module):
                 continue
             if name in ckpt['embeddings']:
-                embed.load_state_dict(ckpt['embeddings'][name])
+                try:
+                    missing, unexpected = embed.load_state_dict(
+                        ckpt['embeddings'][name], strict=True)
+                except RuntimeError as e:
+                    print("Warning: Ignore loading embedding "
+                          f"{name} due to size mismatch."
+                          f"\nActual Error message: {e}")
+                    continue
             else:
                 raise KeyError(f"Embedding '{name}' not found in checkpoint.")
+            if missing:
+                print(f"Embedding '{name}' missing keys: {missing}")
+            if unexpected:
+                print(f"Embedding '{name}' unexpected keys: {unexpected}")
 
         print("Model weight loaded successfully!")
 

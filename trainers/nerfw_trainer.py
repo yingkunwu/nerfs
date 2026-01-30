@@ -3,6 +3,8 @@ import torch
 from collections import defaultdict
 from torchvision.utils import save_image
 from tqdm import tqdm
+import numpy as np
+import imageio
 from concurrent.futures import ThreadPoolExecutor
 
 from .factory import BaseTrainer
@@ -11,11 +13,12 @@ from losses.nerfw_loss import NeRFWLoss
 from utils.nerfw_rendering import render_rays
 from utils.metrics import psnr
 from utils.misc import visualize_depth
+from utils.ray_utils import get_ray_directions, get_rays
 
 
 class NeRFWTrainer(BaseTrainer):
-    def __init__(self, cfg, log_dir):
-        super().__init__(cfg, log_dir)
+    def __init__(self, cfg, **kwargs):
+        super().__init__(cfg, **kwargs)
         self.criterion = NeRFWLoss(cfg.model.lambda_u)
 
     def create_nerf(self, cfg):
@@ -69,7 +72,7 @@ class NeRFWTrainer(BaseTrainer):
 
         return embeddings, models
 
-    def forward(self, inputs):
+    def forward(self, inputs, infer_only=False):
         """Do batched inference on rays using chunk."""
         rays, rays_t = inputs['rays'], inputs['rays_t']
 
@@ -92,6 +95,9 @@ class NeRFWTrainer(BaseTrainer):
 
         for k, v in results.items():
             results[k] = torch.cat(v, 0)
+
+        if infer_only:
+            return results
 
         log = self.criterion(results, inputs)
 
@@ -236,3 +242,62 @@ class NeRFWTrainer(BaseTrainer):
                         # save model weight
                         self.save_model()
                         best_psnr = log[f'val/psnr_{typ}'].item()
+
+    def inference(self, val_dataset):
+        save_dir = os.path.join(self.log_dir, "inference")
+        os.makedirs(save_dir, exist_ok=True)
+
+        sample = val_dataset.sample(idx=5)
+        # define testing camera intrinsics
+        H, W = sample['image_size']
+
+        focal = W / 2 / np.tan(np.pi / 6)  # fov=60 degrees
+        K = np.array([[focal, 0, W / 2],
+                      [0, focal, H / 2],
+                      [0, 0, 1]])
+
+        N_frames = 120
+        dx = np.linspace(0, 0.03, N_frames)
+        dy = np.linspace(0, -0.2, N_frames)
+        dz = np.linspace(-0.5, 0.35, N_frames)
+
+        # define poses
+        c2w = sample['pose']
+        poses = torch.tile(c2w, (N_frames, 1, 1))
+
+        for i in range(N_frames):
+            poses[i, 0, 3] += dx[i]
+            poses[i, 1, 3] += dy[i]
+            poses[i, 2, 3] += dz[i]
+
+        near_t = sample['rays'][..., 6:7]
+        far_t = sample['rays'][..., 7:8]
+
+        for m in self.models.values():
+            m.eval()
+        # no transient during inference
+        self.models['fine'].output_transient = False
+
+        imgs = []
+        for i in tqdm(range(N_frames), total=N_frames):
+            raw_d = get_ray_directions(H, W, K)
+            rays_o, rays_d = get_rays(raw_d, poses[i])
+            rays = torch.cat([rays_o, rays_d, near_t, far_t], dim=1)
+            sample['rays'] = rays.to(self.device)
+            sample['rays_t'] = torch.ones(
+                len(rays), dtype=torch.long).to(self.device) * i // 10
+
+            with torch.no_grad():
+                results = self.forward(sample, infer_only=True)
+            img = results['rgb_fine'].view(H, W, 3).cpu().numpy()
+            img = np.clip(img, 0, 1)
+            img = (img * 255).astype(np.uint8)
+            depth = visualize_depth(results['depth_fine'].view(H, W))
+            depth = depth.permute(1, 2, 0).numpy()
+            depth = (depth * 255).astype(np.uint8)
+
+            stack = np.concatenate([img, depth], axis=1)
+            imgs += [stack]
+            imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
+
+        imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
