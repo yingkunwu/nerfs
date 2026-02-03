@@ -72,4 +72,5 @@ python inference.py --log_path logs/dsnerf/version_<ID>
 
 ### NSFF
 <img src="demo/nsff_loop.gif" alt="nsff" width="800"/>
-* **Note on NSFF**: My implementation of NSFF currently has performance issues. I am very welcome to feedback or suggestions on how to improve this section!
+
+> **Note on NSFF**: My implementation of NSFF currently has performance issues. I am very welcome to feedback or suggestions on how to improve this section!
