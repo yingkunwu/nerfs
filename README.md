@@ -30,7 +30,8 @@ For convenience, I have only tested a specific dataset for each NeRF version, th
 
 ### NeRF++
 * **Dataset:** Download from [Tanks and Temples](https://www.tanksandtemples.org).
-* **Preprocessing:** 1. Follow the [Preparation Guide](preprocess/README.md).
+* **Preprocessing:**
+    1. Follow the [Preparation Guide](preprocess/README.md).
     2. Run: `python preprocess/normalize_cam_dict.py --root_dir <path/to/ROOT_DIR>`
     * *Note: This normalizes poses into a unit circle as proposed by the original paper. Results are saved in `split_data` under the root directory.*
 
