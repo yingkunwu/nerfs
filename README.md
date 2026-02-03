@@ -61,12 +61,15 @@ python inference.py --log_path logs/dsnerf/version_<ID>
 
 ## Demo
 
-* NeRF
-    <img src="demo/nerf_loop.gif" alt="nerf" width="800"/>
-* NeRF++
-    <img src="demo/nerf++_loop.gif" alt="nerf++" width="800"/>
-* NeRFW
-    <img src="demo/nerfw_loop.gif" alt="nerfw" width="800"/>
-* NSFF
-    <img src="demo/nsff_loop.gif" alt="nsff" width="800"/>
-    * **Note on NSFF**: My implementation of NSFF currently has performance issues. I am very welcome to feedback or suggestions on how to improve this section!
+### NeRF
+<img src="demo/nerf_loop.gif" alt="nerf" width="800"/>
+
+### NeRF++
+<img src="demo/nerf++_loop.gif" alt="nerf++" width="800"/>
+
+### NeRFW
+<img src="demo/nerfw_loop.gif" alt="nerfw" width="800"/>
+
+### NSFF
+<img src="demo/nsff_loop.gif" alt="nsff" width="800"/>
+* **Note on NSFF**: My implementation of NSFF currently has performance issues. I am very welcome to feedback or suggestions on how to improve this section!
