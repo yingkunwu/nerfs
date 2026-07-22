@@ -7,29 +7,36 @@ dataset:
   root_dir: ./data/kid
   resolution: 0.5
 
-# model
+# model (nsff_pl-style: additive static+transient composition, Softplus
+# sigma, view-independent transient rgb, learned per-frame time embedding)
 model:
   depth: 8
   width: 256
   xyz_embed_dim: 10  # for positional encoding
   dir_embed_dim: 4  # for positional encoding
-  tra_embed_dim: 16  # for transient embedding
+  tra_embed_dim: 48  # learned per-frame time embedding (N_tau)
   skips: [4]  # add skip connection in the Dth layer
+  flow_scale: 0.2  # scene flow = flow_scale * tanh(...)
 
-# Hyperparameters
-iters: 150000  # total training iterations
+# Hyperparameters (nsff_pl kid recipe)
+# one "epoch" = W*H*N_frames/1000 steps; total steps = num_epochs * that
+num_epochs: 50
 lr: 5e-4
+lr_min: 1e-8  # cosine annealing floor
 momentum: 0.9
 weight_decay: 0.0
-scheduler:
-  decay_step: [120000]
-  decay_gamma: 0.1
 
-batch_size: 1024  # number of uniformly sampled rays per batch
-num_extra_samples: 512  # extra rays hard-mined from the dynamic region
-decay_iteration: 30  # losses/hard-mining decay every decay_iteration * 1000
-chunk: 8192  # number of rays processed for inference
+batch_size: 512  # rays per step
+t_window: 5  # anti-correlated time sampling window
+chunk: 8192  # number of rays processed at once during inference
 N_samples: 128
 perturb: 1.0
 noise_std: 1.0
+
+# losses
+lambda_geo: 0.04  # monodepth + optical flow weight, decays x0.1 / 10 epochs
+lambda_reg: 0.1  # scene flow regularizers
+thickness: 15  # cross-entropy dilation window (odd, in samples)
+
+val_every: 2000
 gpu: 0

@@ -1,3 +1,4 @@
+import os
 import cv2
 import torch
 import numpy as np
@@ -19,6 +20,71 @@ def save_gif(path, imgs, fps=30):
         imageio.mimsave(path, imgs, fps=fps, loop=0)
     except TypeError:
         imageio.mimsave(path, imgs, duration=1000 / fps, loop=0)
+
+
+def export_animation(save_dir, imgs, fps=30, name='animation'):
+    """
+    Export a frame sequence as <save_dir>/<name>.gif (+ .mp4 when ffmpeg is
+    available). ffmpeg's palettegen/paletteuse two-pass gives a much better
+    256-color quantization than imageio's default; fall back to save_gif
+    otherwise. Assumes the frames are also saved as <save_dir>/%03d.png
+    (which _run_inference does).
+    """
+    import shutil
+    import subprocess
+
+    gif_path = os.path.join(save_dir, f'{name}.gif')
+    if shutil.which('ffmpeg') is None:
+        save_gif(gif_path, imgs, fps=fps)
+        return
+
+    src = os.path.join(save_dir, '%03d.png')
+    try:
+        subprocess.run(
+            ['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(fps),
+             '-i', src, '-pix_fmt', 'yuv420p',
+             '-vf', 'crop=trunc(iw/2)*2:trunc(ih/2)*2',
+             os.path.join(save_dir, f'{name}.mp4')], check=True)
+        subprocess.run(
+            ['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(fps),
+             '-i', src,
+             '-filter_complex',
+             '[0:v]split[a][b];[a]palettegen=stats_mode=diff[p];'
+             '[b][p]paletteuse=dither=sierra2_4a',
+             '-loop', '0', gif_path], check=True)
+    except subprocess.CalledProcessError:
+        save_gif(gif_path, imgs, fps=fps)
+
+
+def create_wander_path(c2w, max_trans, n_poses=60):
+    """
+    Small sinusoidal camera wander around a fixed pose (the path nsff_pl and
+    the original NSFF use for their fixed-time "bullet time" demos).
+
+    Inputs:
+        c2w: (3, 4) the reference camera pose
+        max_trans: float, maximum translation amplitude
+        n_poses: number of poses
+
+    Outputs:
+        (n_poses, 3, 4) camera poses
+    """
+    output_poses = []
+    for i in range(n_poses):
+        x_trans = max_trans * np.sin(2.0 * np.pi * i / n_poses)
+        y_trans = max_trans * np.cos(2.0 * np.pi * i / n_poses) / 2.0
+        z_trans = max_trans * np.cos(2.0 * np.pi * i / n_poses)
+
+        i_pose = np.eye(4)
+        i_pose[:3, 3] = [x_trans, y_trans, z_trans]
+        i_pose = np.linalg.inv(i_pose)
+
+        ref_pose = np.eye(4)
+        ref_pose[:3] = c2w[:3, :4]
+
+        output_poses.append((ref_pose @ i_pose)[:3])
+
+    return np.stack(output_poses, 0)
 
 
 def visualize_depth(depth, return_numpy=False, cmap=cv2.COLORMAP_JET):

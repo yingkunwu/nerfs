@@ -222,6 +222,40 @@ def ndc2world(xyz, K, eps=1e-6):
     return world
 
 
+def compute_world_visibility(visibility, xyz, K, H, W, c2w):
+    """
+    Mark which world points are visible from (inside the frustum of) a
+    camera. Used at test time to cull the dynamic field outside the
+    training-camera coverage (cf. nsff_pl).
+
+    Inputs:
+        visibility: (N) 0/1 visibilities, modified in place (incremented)
+        xyz: (N, 3) world coordinates
+        K: (3, 3) camera intrinsics
+        H, W: image height and width
+        c2w: (3, 4) camera-to-world matrix
+    """
+    c2w_ = torch.eye(4, device=xyz.device)
+    c2w_[:3] = c2w
+    w2c = torch.inverse(c2w_)  # (4, 4)
+    R, t = w2c[:3, :3], w2c[:3, 3:]  # (3, 3) and (3, 1)
+    xyz_cam = R @ xyz.T + t  # (3, N)
+
+    xyz_cam_in_front = xyz_cam[2] < 0  # (N) front is negative z axis!
+    if xyz_cam_in_front.sum() == 0:  # all points are behind the camera
+        return
+
+    xyz_cam = xyz_cam[:, xyz_cam_in_front]  # (3, M)
+    xyz_cam[1:] *= -1  # transform axes to "right down front"
+    xyz_img = K @ xyz_cam  # (3, M)
+    xyz_img = xyz_img[:2] / xyz_img[2]  # (2, M)
+
+    visibility[xyz_cam_in_front] += (
+        (xyz_img[0] >= 0) & (xyz_img[0] < W)
+        & (xyz_img[1] >= 0) & (xyz_img[1] < H)
+    ).float()
+
+
 def perturb_samples(z_vals, perturb):
     mids = 0.5 * (z_vals[:, :-1] + z_vals[:, 1:])
     upper = torch.cat([mids, z_vals[:, -1:]], dim=-1)

@@ -11,8 +11,13 @@ from models.nsff import NeRF_Static, NeRF_Dynamic, Embedding
 from losses.nsff_loss import NSFFLoss
 from utils.nsff_rendering import render_rays, interpolate
 from utils.metrics import psnr
-from utils.ray_utils import get_ray_directions, get_rays, get_ndc_rays
-from utils.misc import visualize_depth, create_spiral_poses_from_pose, save_gif
+from utils.ray_utils import (
+    get_ray_directions, get_rays, get_ndc_rays, ndc2world
+)
+from utils.misc import (
+    visualize_depth, create_spiral_poses_from_pose, create_wander_path,
+    export_animation
+)
 from utils.flowlib import flow_to_image
 
 
@@ -20,7 +25,10 @@ class NSFFTrainer(BaseTrainer):
     def __init__(self, cfg, **kwargs):
         super().__init__(cfg, **kwargs)
         self.criterion = NSFFLoss(
-            decay_iteration=cfg.get('decay_iteration', 30))
+            lambda_geo=cfg.get('lambda_geo', 0.04),
+            lambda_reg=cfg.get('lambda_reg', 0.1),
+            thickness=cfg.get('thickness', 15),
+        ).to(self.device)
 
     def create_nerf(self, cfg):
         """Create NeRF model and embeddings."""
@@ -53,14 +61,15 @@ class NSFFTrainer(BaseTrainer):
             width=cfg.model.width,
             skips=cfg.model.skips,
             in_ch_xyz=embeddings['xyz'].output_dim,
-            in_ch_dir=embeddings['dir'].output_dim,
             in_ch_t=cfg.model.tra_embed_dim,
+            flow_scale=cfg.model.get('flow_scale', 0.2),
         )
         models = {'static': model_static, 'dynamic': model_dynamic}
 
         return embeddings, models
 
-    def forward(self, inputs, step, infer_only=False):
+    def forward(self, inputs, test_time=False,
+                output_transient_flow=('fw', 'bw', 'disocc'), dataset=None):
         """Do batched inference on rays using chunk."""
         rays, rays_t, max_t = inputs['rays'], inputs['rays_t'], inputs['max_t']
 
@@ -74,28 +83,28 @@ class NSFFTrainer(BaseTrainer):
                 rays_t[i:i+self.cfg.chunk],
                 max_t,
                 self.cfg.N_samples,
-                self.cfg.perturb,
-                self.cfg.noise_std)
+                self.cfg.perturb if not test_time else 0.0,
+                self.cfg.noise_std if not test_time else 0.0,
+                test_time=test_time,
+                output_transient_flow=output_transient_flow,
+                dataset=dataset)
 
             for k, v in results_chunk.items():
+                if test_time:
+                    v = v.cpu()
                 results[k] += [v]
 
         for k, v in results.items():
             results[k] = torch.cat(v, 0)
 
-        if infer_only:
-            return results
-
-        log = self.criterion(results, inputs, step)
-
-        return results, log
+        return results
 
     def extract_from_sample(self, sample):
         inputs = {
             "rays": sample['rays'].to(self.device),  # [N_rays, 8]
             "rays_t": sample['rays_t'].to(self.device),  # [N_rays,]
             "rgbs": sample['rgbs'].to(self.device),  # [N_rays, 3]
-            "depth": sample['depth'].to(self.device),  # [N_rays,]
+            "depth": sample['depth'].to(self.device),  # [N_rays,] disparity
             "mask": sample['mask'].to(self.device),  # [N_rays,] 1 = dynamic
             "uv_fw": sample['uv_fw'].to(self.device),  # [N_rays, 2]
             "uv_bw": sample['uv_bw'].to(self.device),  # [N_rays, 2]
@@ -109,37 +118,50 @@ class NSFFTrainer(BaseTrainer):
     def fit(self, train_dataset, val_dataset):
         print("Starting training loop")
         best_psnr = 0.0
-        num_extra = self.cfg.get('num_extra_samples', 512)
-        decay_steps = self.criterion.decay_iteration * 1000
-        pbar = tqdm(range(self.cfg.iters), total=self.cfg.iters)
+
+        # nsff_pl schedule: one "epoch" is W*H*N_frames/1000 steps; the
+        # monodepth/flow losses decay x0.1 and the cross-entropy weight
+        # ramps up on a 10-epoch cadence
+        w, h = train_dataset.img_wh
+        N_frames = len(train_dataset)
+        steps_per_epoch = w * h * N_frames // 1000
+        num_epochs = self.cfg.get('num_epochs', 50)
+        total_steps = num_epochs * steps_per_epoch
+        val_every = self.cfg.get('val_every', 2000)
+        print(f"steps/epoch: {steps_per_epoch}, epochs: {num_epochs}, "
+              f"total steps: {total_steps}")
+
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=total_steps,
+            eta_min=self.cfg.get('lr_min', 1e-8))
+
+        max_t = N_frames - 1
+        pbar = tqdm(range(total_steps), total=total_steps)
         for step in pbar:
             for m in self.models.values():
                 m.train()
 
-            # Sample rays from one random frame. During the early stage,
-            # additionally hard-mine rays from the dynamic region (motion
-            # mask) like the original NSFF.
-            n_extra = num_extra if step < decay_steps else 0
+            self.criterion.set_epoch(step // steps_per_epoch)
+
+            # Sample rays from one random frame; consecutive frames are kept
+            # apart (anti-correlated in time) so the static model cannot
+            # explain the dynamic object away.
             sample = train_dataset.sample(
                 shuffle=True, batch_size=self.cfg.batch_size,
-                num_extra=n_extra)
+                t_window=self.cfg.get('t_window', 5))
 
-            max_t = len(train_dataset)
             inputs = self.extract_from_sample(sample)
             inputs["max_t"] = max_t
-            # extra hard-mined rays are excluded from the union render loss
-            inputs["n_uniform"] = self.cfg.batch_size
 
-            # advance the batch pointer
             self.optimizer.zero_grad()
 
-            results, log = self.forward(inputs, step)
+            results = self.forward(inputs)
+            log = self.criterion(results, inputs)
+            log = {f'train/{k}': v for k, v in log.items()}
 
-            log['train/psnr'] = psnr(
-                results['rgb_map_ref'][:self.cfg.batch_size],
-                inputs['rgbs'][:self.cfg.batch_size])
+            log['train/psnr'] = psnr(results['rgb_fine'], inputs['rgbs'])
             log['train/loss'] = sum(
-                [v for k, v in log.items() if 'loss' in k])
+                [v for k, v in log.items() if k.endswith('_l')])
 
             # Backpropagation and optimizer step
             log['train/loss'].backward()
@@ -159,82 +181,94 @@ class NSFFTrainer(BaseTrainer):
             pbar.set_postfix({'loss': f'{loss_val:.6f}',
                               'psnr': f'{psnr_val:.3f}'})
 
-            # Validation
-            if (step + 1) % 1000 == 0:
-                for m in self.models.values():
-                    m.eval()
+            # Validation (always the middle frame, so PSNRs are comparable
+            # across validations)
+            if (step + 1) % val_every == 0 or step == total_steps - 1:
+                val_psnr = self._validate(val_dataset, step)
+                if val_psnr > best_psnr:
+                    self.save_model()
+                    best_psnr = val_psnr
 
-                with torch.no_grad():
-                    max_t = len(val_dataset)
-                    sample = val_dataset.sample(shuffle=False)
-                    inputs = self.extract_from_sample(sample)
-                    inputs["max_t"] = max_t
+    def _validate(self, val_dataset, step):
+        for m in self.models.values():
+            m.eval()
 
-                    results, log = self.forward(inputs, step)
+        with torch.no_grad():
+            N_frames = len(val_dataset)
+            sample = val_dataset.sample(idx=N_frames // 2)
+            inputs = self.extract_from_sample(sample)
+            inputs["max_t"] = N_frames - 1
 
-                    log['val/psnr'] = psnr(
-                        results['rgb_map_ref'], inputs['rgbs'])
-                    log['val/loss'] = sum(
-                        [v for k, v in log.items() if 'loss' in k])
+            # no warped renderings at val, but keep the flow heads so the
+            # integrated scene flow can be visualized
+            results = self.forward(
+                inputs, test_time=True, output_transient_flow=('fw', 'bw'))
 
-                    # TensorBoard logging
-                    for k, v in log.items():
-                        self.writer.add_scalar(k, v.item(), step)
+            val_psnr = psnr(results['rgb_fine'], inputs['rgbs'].cpu())
+            self.writer.add_scalar('val/psnr', val_psnr.item(), step)
 
-                    H, W = sample['image_size']
+            H, W = sample['image_size']
 
-                    img_rgb = results['rgb_map_ref']\
-                        .view(H, W, 3).permute(2, 0, 1).cpu()
-                    img_rgb_rig = results['rgb_map_static']\
-                        .view(H, W, 3).permute(2, 0, 1).cpu()
-                    img_rgb_dy = results['rgb_map_ref_dynamic']\
-                        .view(H, W, 3).permute(2, 0, 1).cpu()
-                    img_gt = sample['rgbs']\
-                        .view(H, W, 3).permute(2, 0, 1).cpu()
+            def to_img(t):
+                return t.view(H, W, 3).permute(2, 0, 1).clamp(0, 1).cpu()
 
-                    depth_gt = visualize_depth(inputs['depth'].view(H, W))
-                    depth = visualize_depth(
-                        -results['depth_map_ref'].view(H, W))
-                    depth_rig = visualize_depth(
-                        -results['depth_map_static'].view(H, W))
-                    depth_dy = visualize_depth(
-                        -results['depth_map_ref_dynamic'].view(H, W))
+            img_gt = to_img(sample['rgbs'])
+            img_rgb = to_img(results['rgb_fine'])
+            img_static = to_img(results['_static_rgb_fine'])
+            img_transient = to_img(results['transient_rgb_fine'])
 
-                    # Create a 2x4 grid
-                    row1 = torch.cat(
-                        [img_gt, img_rgb, img_rgb_rig, img_rgb_dy], -1)
-                    row2 = torch.cat(
-                        [depth_gt, depth, depth_rig, depth_dy], -1)
-                    grid = torch.cat([row1, row2], -2)
-                    self.writer.add_image('val/visualization', grid, step)
+            depth_gt = visualize_depth(inputs['depth'].view(H, W))
+            depth = visualize_depth(-results['depth_fine'].view(H, W))
+            depth_static = visualize_depth(
+                -results['_static_depth_fine'].view(H, W))
+            transient_alpha = results['transient_alpha_fine']\
+                .view(1, H, W).clamp(0, 1).expand(3, H, W).cpu()
 
-                    save_name = os.path.join(
-                        self.save_vis_path, f'val_{step:06d}.png')
-                    save_image(grid, save_name, nrow=2)
+            # 2x4 grid: [gt, composed, static-only, transient] over
+            # [disp gt, composed depth, static depth, transient alpha]
+            row1 = torch.cat([img_gt, img_rgb, img_static, img_transient], -1)
+            row2 = torch.cat(
+                [depth_gt, depth, depth_static, transient_alpha], -1)
+            grid = torch.cat([row1, row2], -2)
+            self.writer.add_image('val/visualization', grid, step)
 
-                    def get_img(target):
-                        diff = (target - inputs['uv']).view(H, W, 2)
-                        return flow_to_image(diff.cpu().numpy())
+            save_name = os.path.join(
+                self.save_vis_path, f'val_{step:06d}.png')
+            save_image(grid, save_name, nrow=2)
 
-                    flow_fw_gt = get_img(inputs['uv_fw'])
-                    flow_bw_gt = get_img(inputs['uv_bw'])
-                    flow_fw_pred = get_img(results['uv_fw'])
-                    flow_bw_pred = get_img(results['uv_bw'])
+            # flow visualization: project the integrated scene flow with the
+            # neighboring frames' projection matrices (same as the loss)
+            Ps, Ks = inputs['Ps'].cpu(), inputs['Ks'].cpu()
+            ts = inputs['rays_t'].cpu()
 
-                    grid_np = np.stack([
-                        flow_fw_gt, flow_bw_gt, flow_fw_pred, flow_bw_pred])
-                    grid_tensor = \
-                        torch.from_numpy(grid_np).permute(0, 3, 1, 2).float()
-                    if grid_tensor.max() > 1.0:
-                        grid_tensor /= 255.0
-                    save_name = os.path.join(
-                        self.save_vis_path, f'flow_{step:06d}.png')
-                    save_image(grid_tensor, save_name, nrow=2)
+            def project(xyz_ndc, ts_nb):
+                xyz_w = ndc2world(xyz_ndc, Ks)
+                P = Ps[ts_nb]
+                uvd = P[:, :3, :3] @ xyz_w.unsqueeze(-1) + P[:, :3, 3:]
+                return uvd[:, :2, 0] / (torch.abs(uvd[:, 2:, 0]) + 1e-8)
 
-                    if log['val/psnr'].item() > best_psnr:
-                        # save model weight
-                        self.save_model()
-                        best_psnr = log['val/psnr'].item()
+            uv_fw = project(results['xyz_fw'],
+                            torch.clamp(ts + 1, max=N_frames - 1))
+            uv_bw = project(results['xyz_bw'], torch.clamp(ts - 1, min=0))
+
+            uv = inputs['uv'].cpu()
+
+            def get_img(target):
+                diff = (target - uv).view(H, W, 2)
+                return flow_to_image(diff.numpy())
+
+            grid_np = np.stack([
+                get_img(inputs['uv_fw'].cpu()), get_img(inputs['uv_bw'].cpu()),
+                get_img(uv_fw), get_img(uv_bw)])
+            grid_tensor = \
+                torch.from_numpy(grid_np).permute(0, 3, 1, 2).float()
+            if grid_tensor.max() > 1.0:
+                grid_tensor /= 255.0
+            save_name = os.path.join(
+                self.save_vis_path, f'flow_{step:06d}.png')
+            save_image(grid_tensor, save_name, nrow=2)
+
+        return val_psnr.item()
 
     def _render_novel_frame(self, c2w, cur_time, K, directions, val_dataset):
         """
@@ -254,37 +288,36 @@ class NSFFTrainer(BaseTrainer):
         shift_near = -min(-1.0, float(c2w[2, 3]))
         rays_o, rays_d = get_ndc_rays(
             K, 1.0, rays_o, rays_d, shift_near=shift_near)
-        near_ = torch.zeros_like(rays_o[:, :1])
-        far_ = torch.ones_like(rays_o[:, :1])
-        rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
+        rays = torch.cat([rays_o, rays_d], dim=1)
         rays_t = flow_time * torch.ones(len(rays_o), dtype=torch.long)
 
         inputs = {
             'rays': rays.to(self.device),
             'rays_t': rays_t.to(self.device),
-            'max_t': len(val_dataset),
+            'max_t': len(val_dataset) - 1,
         }
         with torch.no_grad():
-            results = self.forward(inputs, 0, infer_only=True)
+            results = self.forward(
+                inputs, test_time=True, output_transient_flow=('fw', 'bw'),
+                dataset=val_dataset)
 
-        if dt > 0:
-            # need the t+1 render to interpolate the in-between time
-            inputs['rays_t'] = inputs['rays_t'] + 1
-            with torch.no_grad():
-                results_tp1 = self.forward(inputs, 0, infer_only=True)
-        else:
-            # exact integer time: interpolate() weights t+1 by dt = 0, so we
-            # can reuse the current results and skip a forward pass (this also
-            # avoids querying a time embedding at t+1 for the last frame)
-            results_tp1 = results
-
-        img, depth = interpolate(
-            results, results_tp1, dt,
-            K.to(self.device), c2w.to(self.device), val_dataset.img_wh)
+            if dt == 0:
+                # exact integer time: use the direct volume rendering
+                img = results['rgb_fine'].view(H, W, 3)
+                depth = results['depth_fine'].view(H, W)
+            else:
+                inputs['rays_t'] = inputs['rays_t'] + 1
+                results_tp1 = self.forward(
+                    inputs, test_time=True,
+                    output_transient_flow=('fw', 'bw'), dataset=val_dataset)
+                img, depth = interpolate(
+                    results, results_tp1, dt,
+                    K.to(self.device), c2w.to(self.device),
+                    val_dataset.img_wh)
 
         img = torch.clip(img, 0, 1)
         img = (img.numpy() * 255).astype(np.uint8)
-        depth = visualize_depth(depth.view(H, W))
+        depth = visualize_depth(-depth.view(H, W))
         depth = (depth.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
         return np.concatenate([img, depth], axis=1)
 
@@ -308,7 +341,7 @@ class NSFFTrainer(BaseTrainer):
             imgs += [stack]
             imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
 
-        save_gif(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
+        export_animation(save_dir, imgs, fps=30)
         return imgs
 
     def inference(self, val_dataset):
@@ -325,42 +358,28 @@ class NSFFTrainer(BaseTrainer):
             os.path.join(self.log_dir, "inference"),
             "Rendering spiral poses (view + time)")
 
-    def inference_fixed_time(self, val_dataset, t_fixed=None, n_poses=120,
-                             n_rounds=1, radius_scale=3.0):
+    def inference_fixed_time(self, val_dataset, t_fixed=None, n_poses=60):
         """
         Bullet time: freeze the scene at one instant (the kid stops moving)
-        and gently orbit the camera around that viewpoint. The motion matches
-        the spiral demo's calm per-frame speed -- it just holds time fixed.
-
-        The camera translates on a small world-space circle (radius = a few
-        times the demo's per-frame step) while keeping the fixed view's
-        orientation, exactly like the spiral component of the demo path but
-        without the trajectory drift, so the kid stays centered.
+        and wander the camera around that viewpoint. Uses the same sinusoidal
+        wander path as nsff_pl / the original NSFF demos, with amplitude
+        1/5 of the trajectory's x-extent.
         """
         N = len(val_dataset)
         if t_fixed is None:
             t_fixed = N // 2
         t_fixed = int(np.clip(t_fixed, 0, N - 1))
 
-        base = np.percentile(np.abs(np.diff(val_dataset.poses[:, 0, 3])), 10)
-        radius = radius_scale * base
-
-        fixed_pose = val_dataset.poses[t_fixed]
-        rot, center = fixed_pose[:, :3], fixed_pose[:, 3]
-        cam_poses = []
-        for th in np.linspace(0, 2 * np.pi * n_rounds, n_poses, endpoint=False):
-            pose = np.empty((3, 4), dtype=fixed_pose.dtype)
-            pose[:, :3] = rot
-            pose[:, 3] = center + radius * np.array(
-                [np.cos(th), -np.sin(th), 0.0])
-            cam_poses.append(pose)
-        cam_poses = np.stack(cam_poses, 0)
+        max_trans = np.abs(
+            val_dataset.poses[0, 0, 3] - val_dataset.poses[-1, 0, 3]) / 5
+        cam_poses = create_wander_path(
+            val_dataset.poses[t_fixed], max_trans=max_trans, n_poses=n_poses)
 
         times = [t_fixed] * n_poses
         self._run_inference(
             val_dataset, cam_poses, times,
             os.path.join(self.log_dir, f"inference_fixtime_{t_fixed:03d}"),
-            f"Rendering bullet time @ t={t_fixed} (gentle orbit)")
+            f"Rendering bullet time @ t={t_fixed} (wander path)")
 
     def inference_fixed_view(self, val_dataset, view_idx=None, n_frames=None):
         """
@@ -373,7 +392,6 @@ class NSFFTrainer(BaseTrainer):
         view_idx = int(np.clip(view_idx, 0, N - 1))
         if n_frames is None:
             n_frames = 4 * N
-
         cam_poses = np.tile(val_dataset.poses[view_idx], (n_frames, 1, 1))
         times = np.linspace(0, N - 1, n_frames).tolist()[:-1]
         cam_poses = cam_poses[:len(times)]

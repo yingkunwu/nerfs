@@ -39,9 +39,11 @@ class Embedding(nn.Module):
 
 class NeRF_Static(nn.Module):
     """
-    NeRF network of static (time-invariant) scene representation.
-    We predict an extra blending weight field 'v' from intermediate features
-    along with opacity 'sigma' for blending with transient components.
+    NeRF network of the static (time-invariant) scene representation.
+    Follows nsff_pl's static branch: sigma from the xyz features, rgb from a
+    single view-dependent layer. There is NO learned blending weight — the
+    static and dynamic fields are composited additively (NeRF-W style) in the
+    renderer.
     """
 
     def __init__(self,
@@ -69,19 +71,16 @@ class NeRF_Static(nn.Module):
             setattr(self, f"xyz_encoding_{i}", block)
 
         self.xyz_final = nn.Linear(width, width)
-
-        # outputs
-        self.sigma = nn.Linear(width, 1)
-        nn.init.constant_(self.sigma.bias, 0.1)
-        self.rgb = nn.Sequential(
-            nn.Linear(width + in_ch_dir, width // 2),
+        self.dir_encoding = nn.Sequential(
+            nn.Linear(width + in_ch_dir, width),
             nn.ReLU(inplace=True),
-            nn.Linear(width // 2, 3),
-            nn.Sigmoid(),
         )
-        self.v = nn.Sequential(
-            nn.Linear(width, 1),
-            nn.Sigmoid()
+
+        # outputs (raw sigma; Softplus is applied in the renderer)
+        self.sigma = nn.Linear(width, 1)
+        self.rgb = nn.Sequential(
+            nn.Linear(width, 3),
+            nn.Sigmoid(),
         )
 
     def forward(self, x):
@@ -98,39 +97,40 @@ class NeRF_Static(nn.Module):
             h = getattr(self, f"xyz_encoding_{i}")(h)
 
         sigma = self.sigma(h)
-        v = self.v(h)
 
         h_final = self.xyz_final(h)
-        d_in = torch.cat((h_final, dirs), dim=-1)
-        rgb = self.rgb(d_in)
+        h_dir = self.dir_encoding(torch.cat((h_final, dirs), dim=-1))
+        rgb = self.rgb(h_dir)
 
-        return torch.cat((rgb, sigma, v), dim=-1)
+        return torch.cat((rgb, sigma), dim=-1)
 
 
 class NeRF_Dynamic(nn.Module):
     """
-    NeRF network of dynamic (time-variant) scene representation.
-    We encode an input time indices 'i' into the MLP and predict time-dependent
-    scene flow fields F_i and disocclusionweight fields W_i from the
-    intermediate features along with opacity 'sigma'.
+    NeRF network of the dynamic (time-variant) scene representation.
+    Follows nsff_pl's transient branch: conditioned on a learned per-frame
+    time embedding, VIEW-INDEPENDENT rgb, raw sigma (Softplus in the
+    renderer), and forward/backward scene flow through separate
+    `flow_scale * tanh` heads. There is no learned disocclusion head —
+    occlusion weights are inferred from the warped rendering weights.
     """
 
     def __init__(self,
-                 depth=4,
-                 width=128,
+                 depth=8,
+                 width=256,
                  in_ch_xyz=63,
-                 in_ch_dir=27,
-                 in_ch_t=16,
-                 skips=(4,)):
+                 in_ch_t=48,
+                 skips=(4,),
+                 flow_scale=0.2):
         super().__init__()
         self.depth = depth
         self.width = width
         self.in_ch_xyz = in_ch_xyz
-        self.in_ch_dir = in_ch_dir
         self.in_ch_t = in_ch_t
         self.skips = skips
+        self.flow_scale = flow_scale
 
-        # xyz encoding layers
+        # xyz+t encoding layers
         for i in range(depth):
             if i == 0:
                 lin = nn.Linear(in_ch_xyz + in_ch_t, width)
@@ -145,42 +145,34 @@ class NeRF_Dynamic(nn.Module):
 
         # outputs
         self.sigma = nn.Linear(width, 1)
-        nn.init.constant_(self.sigma.bias, 0.1)
         self.rgb = nn.Sequential(
-            nn.Linear(width + in_ch_dir, width // 2),
-            nn.ReLU(inplace=True),
-            nn.Linear(width // 2, 3),
+            nn.Linear(width, 3),
             nn.Sigmoid(),
         )
+        self.flow_fw = nn.Sequential(nn.Linear(width, 3), nn.Tanh())
+        self.flow_bw = nn.Sequential(nn.Linear(width, 3), nn.Tanh())
 
-        self.sf = nn.Sequential(
-            nn.Linear(width, 6),
-            nn.Tanh()
-        )
-        self.prob = nn.Sequential(
-            nn.Linear(width, 2),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        xyz_t, dirs = torch.split(
-            x,
-            [self.in_ch_xyz + self.in_ch_t, self.in_ch_dir],
-            dim=-1
-        )
-
-        h = xyz_t
+    def forward(self, x, output_flow=('fw', 'bw')):
+        """
+        Inputs:
+            x: (B, in_ch_xyz + in_ch_t) embedded position and time
+            output_flow: which scene-flow heads to evaluate; the outputs are
+                concatenated in the given order after (rgb, sigma)
+        """
+        h = x
         for i in range(self.depth):
             if i in self.skips:
-                h = torch.cat((xyz_t, h), dim=-1)
+                h = torch.cat((x, h), dim=-1)
             h = getattr(self, f"xyz_encoding_{i}")(h)
 
-        sigma = self.sigma(h)
-        sf = self.sf(h)
-        prob = self.prob(h)
-
         h_final = self.xyz_final(h)
-        d_in = torch.cat((h_final, dirs), dim=-1)
-        rgb = self.rgb(d_in)
+        sigma = self.sigma(h_final)
+        rgb = self.rgb(h_final)
 
-        return torch.cat((rgb, sigma, sf, prob), dim=-1)
+        out = [rgb, sigma]
+        if 'fw' in output_flow:
+            out.append(self.flow_scale * self.flow_fw(h_final))
+        if 'bw' in output_flow:
+            out.append(self.flow_scale * self.flow_bw(h_final))
+
+        return torch.cat(out, dim=-1)

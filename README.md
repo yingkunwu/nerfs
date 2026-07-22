@@ -26,7 +26,7 @@ NeRF samples points inside a bounded volume, but in real 360° captures the back
 Internet photos of a landmark differ in lighting, exposure, and contain tourists/cars that only exist in one photo. Two ideas fix this: (1) a learned **per-image appearance embedding** is fed to the color head, so each photo can have its own lighting while sharing one geometry; (2) a separate **transient head** (also with a per-image embedding) models the stuff that only exists in that one photo, together with an uncertainty value that automatically down-weights the loss on those pixels. At test time we drop the transient part and get a clean static scene.
 
 ### NSFF (Neural Scene Flow Fields)
-One monocular video of a *moving* scene — so for every moment we only have ONE view, and classic NeRF is hopeless. NSFF uses **two fields**: a static NeRF for the background, and a dynamic NeRF that takes time as input and additionally predicts **scene flow** (where each 3D point moves to in the next/previous frame). The two are blended per 3D point with a learned blending weight. Because one view per time step is not enough supervision, NSFF leans on 2D priors: a monocular depth network (scale-invariant depth loss) and RAFT optical flow (the predicted 3D scene flow, projected to 2D, must match the observed flow). Warping the dynamic field to neighboring frames and re-rendering gives extra photometric supervision, with learned occlusion weights to ignore pixels where warping is invalid. Everything is done in **NDC space** (the forward-facing parameterization where the scene is squeezed into a unit cube — this only works if the scene scale is normalized correctly, see the bug notes below!). At test time, frame interpolation works by splatting the per-plane radiance along the predicted scene flow (softmax splatting).
+One monocular video of a *moving* scene — so for every moment we only have ONE view, and classic NeRF is hopeless. NSFF uses **two fields**: a static NeRF for the background, and a dynamic NeRF that takes time as input (here: a learned 48-dim per-frame embedding) and additionally predicts **scene flow** (where each 3D point moves to in the next/previous frame). Following [nsff_pl](https://github.com/kwea123/nsff_pl), the two fields are composited **additively in NeRF-W style** — `alpha = 1 − (1−α_static)(1−α_dynamic)` — instead of the original's learned per-point blending weight. Because one view per time step is not enough supervision, NSFF leans on 2D priors: a monocular depth network (scale-invariant depth loss) and RAFT optical flow (the predicted 3D scene flow, projected to 2D, must match the observed flow). Warping the dynamic field to neighboring frames and re-rendering gives extra photometric supervision; occlusion weights are **inferred from the difference between warped and reference rendering weights** (no learned occlusion head). Two entropy-style losses keep the decomposition honest: an entropy loss makes the dynamic object "thin" along each ray, and a thickness cross-entropy loss pushes the static field's density peaks away from the dynamic ones. Everything is done in **NDC space** (the forward-facing parameterization where the scene is squeezed into a unit cube — this only works if the scene scale is normalized correctly, see the bug notes below!). At test time, frame interpolation works by splatting the per-plane radiance along the predicted scene flow (softmax splatting), and the dynamic field is **visibility-culled** outside the training-camera frustum to avoid ghosting on novel camera paths.
 
 ---
 
@@ -99,7 +99,7 @@ python inference.py --log_path logs/nsff/version_<ID> --mode fixview  --view_idx
 # Render all three
 python inference.py --log_path logs/nsff/version_<ID> --mode all
 ```
-`--t_fixed` / `--view_idx` default to the middle frame. Each mode writes its own `inference_*` subfolder (per-frame PNGs + a looping `animation.gif`). The fixed-view mode interpolates fractional time steps via scene-flow warping + softmax splatting, so it needs `cupy` (see the cupy note below).
+`--t_fixed` / `--view_idx` default to the middle frame. Each mode writes its own `inference_*` subfolder (per-frame PNGs + a looping `animation.gif`, plus an `animation.mp4` when ffmpeg is available). Bullet time follows nsff_pl's sinusoidal *wander path* around the fixed view. The fixed-view mode interpolates fractional time steps via scene-flow warping + softmax splatting, so it needs `cupy` (see the cupy note below).
 
 ## Demo
 
@@ -187,7 +187,174 @@ Every training step re-loaded 8 full images + flows + disparity maps from disk a
 
 **Result:** best validation PSNR went from **29.7 → 33.5+**, with correct depth, real scene flow, and a clean static/dynamic separation.
 
-Things that LOOK like bugs but are faithful to the original — do not "fix":
-* the small-scene-flow regularizer sums over the *coordinate* axis (dim −1), exactly like the original;
-* the depth loss is applied to the dynamic-only depth (not the blended one);
-* the blending weight is predicted by the **static** model (paper Eq. for `(c, σ, v)`), and multiplies the alpha *outside* the exponent.
+---
+
+## NSFF v2: Why the faithful reproduction fell short — a full analysis (2026-07-22)
+
+After all eleven fixes above, the pipeline was a *correct* reproduction of the original
+[Neural-Scene-Flow-Fields](https://github.com/zhengqili/Neural-Scene-Flow-Fields): val PSNR 33.5,
+correct depth, real scene flow, clean decomposition. Yet the demos were still clearly worse than
+[nsff_pl](https://github.com/kwea123/nsff_pl)'s reference GIF: softer textures everywhere, ghost
+fragments of the kid on novel camera paths, and speckled depth on the road. This section documents
+the investigation of that residual gap, the conclusion, and every change that closed it.
+
+### Step 1 — Ruling out the renderer
+
+The natural first suspects were inference-side: maybe the softsplat/MPI interpolation path blurs,
+maybe the NDC↔world round-trip is inexact, maybe the GIF export destroys detail. Controlled
+experiments on the trained v189 checkpoint (same weights, same view, rendered several ways):
+
+| Experiment | PSNR vs GT | Conclusion |
+|---|---|---|
+| Direct volume rendering, `perturb=0, noise_std=0` | 33.49 | baseline model quality |
+| Direct rendering, `perturb=1, noise_std=1` (what inference was actually doing) | 33.38 | test-time noise costs only 0.1 dB in RGB — but it visibly speckles the depth |
+| softsplat/MPI `interpolate()` path at `dt=0` | 33.489 | **numerically identical** to direct rendering — the splatting renderer was NOT the blur source (`ndc2world` was verified to be the exact inverse of `get_ndc_rays`) |
+| GIF re-encode of a rendered frame | ~34 dB vs its own PNG | imageio's 256-color quantization adds visible posterization, but the reference GIF survives the same encoding — so this is cosmetic, not causal |
+
+**Conclusion:** the inference stack was faithful. The trained model itself was the ceiling —
+33.5 dB with soft textures is simply where *this formulation* converges. The reference demo was
+produced by nsff_pl, which does **not** implement the paper's formulation verbatim; its quality
+comes from a set of deliberate design changes. In other words: **there was no remaining bug to
+find — the two repos train different methods.**
+
+### Step 2 — The key reason: how the two fields are composited
+
+This is the single most important difference, and it lives at the **rendering equation** level.
+
+**The original (what we had).** The static model predicts a time-independent blending weight
+$w(\mathbf{x}) \in [0,1]$, and the two fields are mixed through one gate inside the volume
+rendering integral:
+
+$$\alpha_{dy} = \big(1-e^{-\sigma_{dy}\delta}\big)\,w,\qquad
+\alpha_{st} = \big(1-e^{-\sigma_{st}\delta}\big)\,(1-w),\qquad
+T_i=\prod_{j<i}(1-\alpha_{dy})(1-\alpha_{st})$$
+
+$$C = \sum_i T_i\,\big(\alpha_{dy}\,c_{dy} + \alpha_{st}\,c_{st}\big)$$
+
+The failure mode is structural. Because $w$ has **no time input**, every 3D region the kid *ever*
+occupies during the 30 frames must be classified "dynamic" *for all frames* — including the 28
+frames in which that region is actually empty road. Two consequences:
+
+1. **Gradient starvation of the static field.** Inside the kid's swept volume the static branch
+   is multiplied by $1-w\approx 0$, so the photometric loss sends it almost no gradient. It
+   drifts to garbage unless propped up by an auxiliary masked static loss (bug #8 above was
+   exactly this band-aid — treating a symptom of the formulation, not a bug in the code).
+2. **Soft gates render soft images.** Anywhere the optimizer leaves $w$ fractional, the output is
+   a 50/50 blend of two half-trained fields. The original's entropy loss on $w$ pushes the *gate*
+   toward 0/1, but does nothing to sharpen the *geometry* of either field along the ray — the mush
+   is baked into the compositing.
+
+**nsff_pl (what we ported).** Delete the gate entirely and composite the two fields as independent
+alpha events, NeRF-W style:
+
+$$\alpha_s = 1-e^{-\sigma_s\delta_s},\qquad
+\alpha_d = 1-e^{-\sigma_d\delta_d},\qquad
+\alpha = 1-(1-\alpha_s)(1-\alpha_d),\qquad
+T_i=\prod_{j<i}(1-\alpha_j)$$
+
+$$C=\sum_i T_i\,\big(\alpha_s\,c_s+\alpha_d\,c_d\big)$$
+
+Now **both fields receive gradient at every sample, in every frame** — the static field keeps
+learning the road even while the kid stands on it, because nothing multiplies it to zero. The
+static/dynamic *separation* is no longer enforced by an architectural gate but by two explicit,
+targeted losses (Step 3). This is why nsff_pl needs neither the blending weight nor the masked
+static loss, and why its static background is tack-sharp: it gets ~30× more effective supervision
+in every region the dynamic object ever visits.
+
+### Step 3 — The other structural causes, in decreasing order of impact
+
+1. **Learned occlusion weights can be bought off.** The original *predicts* disocclusion
+   probabilities that gate the warped-frame photometric loss, regularized toward 1 with
+   $0.1\cdot L_1$. The network can pay that small fixed penalty to mute the warping supervision
+   exactly where scene flow is hardest to learn — which is exactly where supervision matters most.
+   nsff_pl removes the head and *derives* occlusion from geometry:
+   $\text{disocc}=1-\lvert w_{warped}-w_{ref}\rvert$ (detached). A derived quantity cannot be
+   gamed by the optimizer, so the photometric pressure on scene flow never disappears.
+
+2. **ReLU density is a rough optimization landscape.** With $\mathrm{relu}(\sigma+\varepsilon)$,
+   any sample pushed below zero has exactly zero gradient — density boundaries rattle between
+   "off" (no gradient) and "on" instead of settling. Softplus keeps a smooth gradient everywhere.
+   Empirically this is what killed the depth speckle: the near-noise-free depth maps appeared in a
+   20k-step smoke run, long before convergence, so it is the activation — not training length —
+   that cleans the density field.
+
+3. **Ray termination details.** The original used one huge last interval ($10^{10}$, scaled by
+   $\lVert\mathbf{d}\rVert$) for both fields. nsff_pl uses **asymmetric last deltas**: 100 for the
+   static field (the background is opaque — rays must terminate, no semi-transparent far-plane
+   fog) and $10^{-3}$ for the dynamic field (a thin object must NOT be able to absorb the whole
+   remaining ray). Deltas are also used in raw NDC-z units, not scaled by the ray norm.
+
+4. **Supervision hygiene and budget.** (a) *Anti-correlated time sampling*: consecutive training
+   batches are drawn from frames at least 5 apart, so the static field cannot slowly memorize the
+   dynamic object from temporally adjacent, nearly identical views. (b) *Schedule*: 340k steps
+   with cosine decay $5\times10^{-4}\rightarrow10^{-8}$, versus our 150k with a single late ×0.1
+   drop — high-frequency texture needs the long low-LR tail (the original authors' released kid
+   model was itself trained 360k steps). (c) A 48-dim time embedding (ours was 16) gives the
+   dynamic field enough capacity to separate the 30 time instants sharply.
+
+### Step 4 — What had to change at the rendering level (summary)
+
+In `utils/nsff_rendering.py`, ranked by importance:
+
+1. **Compositing equation**: blend-weight mixture → independent-alpha additive composition
+   (the equations in Step 2). The static model loses its `v` head.
+2. **Sigma activation**: ReLU → Softplus, for both fields, noise added *before* the activation.
+3. **Last-sample deltas**: uniform $10^{10}\cdot\lVert\mathbf{d}\rVert$ → static 100 / dynamic
+   $10^{-3}$, unscaled.
+4. **Warped re-rendering** (the fw/bw photometric supervision) now composites the warped dynamic
+   field **with the current static field** instead of rendering the dynamic field alone — the
+   warped prediction is compared against a full image, so it must explain occlusions by the
+   background correctly.
+5. **Occlusion**: the learned 2-channel prob head is gone; disocclusion is computed from the
+   warped vs reference rendering weights inside the renderer.
+6. **Test time only**: `perturb=0, noise_std=0`; integer-time frames use direct volume rendering
+   (the splat path is reserved for fractional-time interpolation); dynamic sigma is **visibility
+   culled** (set to −10 before Softplus) at sample points that no training camera sees — this is
+   what removes the ghost fragments on novel camera paths, since nothing in training ever
+   constrains the dynamic field outside the training frusta.
+
+### Step 5 — What had to change at the loss level
+
+In `losses/nsff_loss.py`:
+
+* **Entropy on the dynamic *rendering weights*** (not on the blend gate):
+  $10^{-3}\sum_i -w_i\log w_i$ per ray — makes the dynamic object occupy few, concentrated
+  samples along each ray ("thin"), which is a geometry statement, not a gate statement.
+* **Thickness cross-entropy**: dilate the dynamic weights with a 15-sample box filter, then
+  penalize $\sum_i \tilde{w}^{dy}_i \log(w^{st}_i+10^{-8})$ (weight ramping 0→2e-4 over 10
+  epochs) — pushes static density peaks at least ~15 samples away from dynamic ones, so the two
+  fields cannot both explain the same surface.
+* Photometric warp loss normalized by mean disocclusion; cycle loss weighted per-sample by
+  disocclusion; monodepth loss moves to the **composite** depth; monodepth/flow weights decay
+  ×0.1 every 10 epochs. The remaining flow regularizers (temporal linearity, minimal flow,
+  spatial smoothness) are unchanged — they were already correct.
+
+### Symptom → root cause → fix
+
+| Observed symptom (v189) | Root cause | Fix |
+|---|---|---|
+| Soft/mushy textures everywhere | gradient starvation + fractional blend gate + short LR schedule | additive composition; entropy + thickness losses; 340k cosine schedule |
+| Ghost fragments of the kid at novel views | dynamic field unconstrained outside training frusta; swept volume marked dynamic for all t | test-time visibility culling; additive composition |
+| Speckled/noisy depth | ReLU density boundaries + `noise_std=1, perturb=1` left on at eval | Softplus sigma; noise/perturb forced to 0 at test |
+| Garbage in static-only renders (pre-v189 #8) | time-independent $w$ starves static field in swept volume | additive composition (masked static loss no longer needed) |
+| Semi-transparent far-plane fog | shared huge last delta | asymmetric last deltas (static 100 / dynamic 1e-3) |
+| Weak scene flow in hard regions | learned occlusion probabilities muting the warp loss | occlusion derived from warped-weight difference (ungameable) |
+| GIF posterization | imageio single-pass palette | ffmpeg palettegen/paletteuse two-pass (+ mp4 export) |
+
+### Outcome
+
+`logs/nsff/version_191`: best val PSNR **33.5 → 34.96** (now measured noise-free, i.e. a stricter
+metric), monotone convergence over 340k steps (~5.6 h on one RTX 4090 at 17.9 it/s), no ghosting
+on the wander path, near noise-free depth, and bullet-time/fixed-view/spiral demos on par with the
+nsff_pl reference. The decomposition needs no auxiliary props: the static-only render is clean in
+the kid's swept volume *without* a masked static loss.
+
+**The takeaway:** a faithful reproduction of the paper converges to the paper's quality, not to
+nsff_pl's. The gap was not a bug but a formulation: a time-independent multiplicative gate between
+the two fields (plus a learnable occlusion escape hatch) creates degenerate optima that no amount
+of code-fixing removes. Recomposing the fields additively and replacing learned gates with derived
+quantities and explicit geometry losses is what makes the sharp results possible.
+
+*(Historical note: the pipeline described in the bug list above was faithful to the original
+zhengqili implementation — learned blending weight, learned occlusion probabilities, dynamic-only
+depth loss. The current code no longer contains those pieces; see the v2 section above.)*

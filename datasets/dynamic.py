@@ -37,6 +37,7 @@ class DynamicDataLoader(DataLoader):
         self.frames = []
         self.read_meta()
         self.count = 0
+        self.last_t = -1
 
     def _resize_intrinsics(self, K, orig_hw):
         """Downscale intrinsics to match self.resolution (integer factor)."""
@@ -267,7 +268,8 @@ class DynamicDataLoader(DataLoader):
     def __len__(self):
         return len(self.frames)
 
-    def sample(self, shuffle=False, idx=None, batch_size=None, num_extra=0):
+    def sample(self, shuffle=False, idx=None, batch_size=None, num_extra=0,
+               t_window=None):
         """
         Sample rays from one frame.
 
@@ -279,9 +281,21 @@ class DynamicDataLoader(DataLoader):
             num_extra: number of extra rays sampled from the dynamic region
                 (motion mask), appended AFTER the uniform rays. Used for hard
                 mining in early training. Only valid with batch_size.
+            t_window: if set (with shuffle), the next frame is sampled
+                OUTSIDE +-t_window of the previously sampled frame, so the
+                static model cannot explain the dynamic object away
+                (anti-correlated time sampling, cf. nsff_pl).
         """
         if shuffle:
-            i = random.choice(self.frames)
+            if t_window is None or self.last_t == -1:
+                i = random.choice(self.frames)
+            else:
+                valid_t = list(
+                    set(self.frames)
+                    - set(range(self.last_t - t_window,
+                                self.last_t + t_window + 1)))
+                i = random.choice(valid_t)
+            self.last_t = i
         else:
             if self.count >= len(self.frames):
                 self.count = 0

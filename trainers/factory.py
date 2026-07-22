@@ -51,11 +51,16 @@ class BaseTrainer(ABC):
             parameters, lr=cfg.lr, weight_decay=cfg.weight_decay
         )
 
-        self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            self.optimizer,
-            milestones=cfg.scheduler.decay_step,
-            gamma=cfg.scheduler.decay_gamma
-        )
+        # trainers may create their own scheduler (e.g. NSFF uses cosine
+        # annealing set up in fit(), where the total step count is known)
+        if cfg.get('scheduler') is not None:
+            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                self.optimizer,
+                milestones=cfg.scheduler.decay_step,
+                gamma=cfg.scheduler.decay_gamma
+            )
+        else:
+            self.scheduler = None
 
         # Logging & output dirs
         if create_log_folder:
