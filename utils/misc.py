@@ -9,6 +9,18 @@ from scipy.spatial.transform import Slerp
 from .colmap_utils import normalize
 
 
+def save_gif(path, imgs, fps=30):
+    """
+    Save a looping GIF, compatible with both old (< 2.28, fps kwarg) and
+    new (>= 2.28, duration in ms) imageio versions.
+    """
+    import imageio
+    try:
+        imageio.mimsave(path, imgs, fps=fps, loop=0)
+    except TypeError:
+        imageio.mimsave(path, imgs, duration=1000 / fps, loop=0)
+
+
 def visualize_depth(depth, return_numpy=False, cmap=cv2.COLORMAP_JET):
     """
     Convert a depth map to a color image tensor.

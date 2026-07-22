@@ -12,7 +12,7 @@ from losses.nsff_loss import NSFFLoss
 from utils.nsff_rendering import render_rays, interpolate
 from utils.metrics import psnr
 from utils.ray_utils import get_ray_directions, get_rays, get_ndc_rays
-from utils.misc import visualize_depth, create_spiral_poses_from_pose
+from utils.misc import visualize_depth, create_spiral_poses_from_pose, save_gif
 from utils.flowlib import flow_to_image
 
 
@@ -236,16 +236,61 @@ class NSFFTrainer(BaseTrainer):
                         self.save_model()
                         best_psnr = log['val/psnr'].item()
 
-    def inference(self, val_dataset):
-        save_dir = os.path.join(self.log_dir, "inference")
+    def _render_novel_frame(self, c2w, cur_time, K, directions, val_dataset):
+        """
+        Render a single novel (view, time) frame.
+
+        @c2w is the camera pose to render from and @cur_time is a continuous
+        time index. Integer times render the scene directly; fractional times
+        are produced by warping the dynamic field along the predicted scene
+        flow and splatting it (softsplat) between the two bracketing integer
+        times. Returns an (H, W*2, 3) uint8 array of [rgb | depth].
+        """
+        W, H = val_dataset.img_wh
+        flow_time = int(np.floor(cur_time))
+        dt = float(cur_time - np.floor(cur_time))
+
+        rays_o, rays_d = get_rays(directions, c2w)
+        shift_near = -min(-1.0, float(c2w[2, 3]))
+        rays_o, rays_d = get_ndc_rays(
+            K, 1.0, rays_o, rays_d, shift_near=shift_near)
+        near_ = torch.zeros_like(rays_o[:, :1])
+        far_ = torch.ones_like(rays_o[:, :1])
+        rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
+        rays_t = flow_time * torch.ones(len(rays_o), dtype=torch.long)
+
+        inputs = {
+            'rays': rays.to(self.device),
+            'rays_t': rays_t.to(self.device),
+            'max_t': len(val_dataset),
+        }
+        with torch.no_grad():
+            results = self.forward(inputs, 0, infer_only=True)
+
+        if dt > 0:
+            # need the t+1 render to interpolate the in-between time
+            inputs['rays_t'] = inputs['rays_t'] + 1
+            with torch.no_grad():
+                results_tp1 = self.forward(inputs, 0, infer_only=True)
+        else:
+            # exact integer time: interpolate() weights t+1 by dt = 0, so we
+            # can reuse the current results and skip a forward pass (this also
+            # avoids querying a time embedding at t+1 for the last frame)
+            results_tp1 = results
+
+        img, depth = interpolate(
+            results, results_tp1, dt,
+            K.to(self.device), c2w.to(self.device), val_dataset.img_wh)
+
+        img = torch.clip(img, 0, 1)
+        img = (img.numpy() * 255).astype(np.uint8)
+        depth = visualize_depth(depth.view(H, W))
+        depth = (depth.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+        return np.concatenate([img, depth], axis=1)
+
+    def _run_inference(self, val_dataset, cam_poses, times, save_dir, desc):
+        """Render a sequence of (camera pose, time) pairs into a looping GIF."""
         os.makedirs(save_dir, exist_ok=True)
-
-        max_trans = np.percentile(
-            np.abs(np.diff(val_dataset.poses[:, 0, 3])), 10)
-        radii = np.array([max_trans, max_trans, 0])
-        poses = create_spiral_poses_from_pose(
-            val_dataset.poses, radii, n_poses=6 * len(val_dataset))
-
         W, H = val_dataset.img_wh
         K = torch.FloatTensor(val_dataset.K)
         directions = get_ray_directions(H, W, K)
@@ -254,57 +299,28 @@ class NSFFTrainer(BaseTrainer):
             m.eval()
 
         imgs = []
-        total = np.linspace(
-            0, len(val_dataset) - 1, 6 * len(val_dataset)
-        ).tolist()[:-1]
-        for i, cur_time in tqdm(enumerate(total),
-                                total=len(total),
-                                desc="Rendering spiral poses"):
-            flow_time = int(np.floor(cur_time))
-            dt = cur_time - np.floor(cur_time)
-
-            c2w = torch.FloatTensor(poses[i])
-            rays_o, rays_d = get_rays(directions, c2w)
-            rays_o, rays_d = get_ndc_rays(K, 1.0, rays_o, rays_d)
-
-            near, far = 0, 1
-
-            near_ = near * torch.ones_like(rays_o[:, :1])
-            far_ = far * torch.ones_like(rays_o[:, :1])
-            rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
-            rays_t = flow_time * torch.ones(len(rays_o), dtype=torch.long)
-
-            inputs = {
-                'rays': rays.to(self.device),
-                "rays_t": rays_t.to(self.device),
-                "max_t": len(val_dataset)
-            }
-            with torch.no_grad():
-                results = self.forward(inputs, i, infer_only=True)
-
-            inputs['rays_t'] += 1
-            with torch.no_grad():
-                results_tp1 = self.forward(inputs, i, infer_only=True)
-
-            img, depth = interpolate(
-                results,
-                results_tp1,
-                dt,
-                K.to(self.device),
-                c2w.to(self.device),
-                val_dataset.img_wh)
-
-            img = torch.clip(img, 0, 1)
-            img = (img.numpy() * 255).astype(np.uint8)
-            depth = visualize_depth(depth.view(H, W))
-            depth = depth.permute(1, 2, 0).numpy()
-            depth = (depth * 255).astype(np.uint8)
-
-            stack = np.concatenate([img, depth], axis=1)
+        for i, (pose, cur_time) in tqdm(
+                enumerate(zip(cam_poses, times)),
+                total=len(times), desc=desc):
+            c2w = torch.FloatTensor(pose)
+            stack = self._render_novel_frame(
+                c2w, cur_time, K, directions, val_dataset)
             imgs += [stack]
             imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
 
-            del results
-            del results_tp1
+        save_gif(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
+        return imgs
 
-        imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
+    def inference(self, val_dataset):
+        """Spiral camera path AND advancing time (the default demo)."""
+        N = len(val_dataset)
+        max_trans = np.percentile(
+            np.abs(np.diff(val_dataset.poses[:, 0, 3])), 10)
+        radii = np.array([max_trans, max_trans, 0])
+        cam_poses = create_spiral_poses_from_pose(
+            val_dataset.poses, radii, n_poses=6 * N)
+        times = np.linspace(0, N - 1, 6 * N).tolist()[:-1]
+        self._run_inference(
+            val_dataset, cam_poses, times,
+            os.path.join(self.log_dir, "inference"),
+            "Rendering spiral poses (view + time)")

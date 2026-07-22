@@ -11,7 +11,7 @@ from models.nerf import NeRF, Embedding
 from losses.nerf_loss import NeRFLoss, DepthLoss
 from utils.nerf_rendering import render_rays
 from utils.metrics import psnr
-from utils.misc import visualize_depth, create_spiral_poses
+from utils.misc import visualize_depth, create_spiral_poses, save_gif
 from utils.ray_utils import get_ray_directions, get_rays, get_ndc_rays
 
 
@@ -305,4 +305,4 @@ class NeRFTrainer(BaseTrainer):
             imgs += [stack]
             imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
 
-        imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
+        save_gif(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)

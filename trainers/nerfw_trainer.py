@@ -12,7 +12,7 @@ from models.nerfw import NeRFW, Embedding
 from losses.nerfw_loss import NeRFWLoss
 from utils.nerfw_rendering import render_rays
 from utils.metrics import psnr
-from utils.misc import visualize_depth
+from utils.misc import visualize_depth, save_gif
 from utils.ray_utils import get_ray_directions, get_rays
 
 
@@ -300,4 +300,4 @@ class NeRFWTrainer(BaseTrainer):
             imgs += [stack]
             imageio.imwrite(os.path.join(save_dir, f'{i:03d}.png'), stack)
 
-        imageio.mimsave(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
+        save_gif(os.path.join(save_dir, 'animation.gif'), imgs, fps=30)
