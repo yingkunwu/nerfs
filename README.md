@@ -133,7 +133,7 @@ Because NSFF learns the scene as a function of camera position *and* time separa
 
 ## NSFF Debugging Notes (2026-07)
 
-For ~187 training runs the NSFF implementation could not reproduce the paper results: the rendered depth was pure noise, the predicted scene flow was ~zero, and the static/dynamic decomposition failed (the static model was fog, the dynamic model memorized the whole scene). Below is the full list of bugs that were found and fixed, in decreasing order of importance. Reference implementations used for line-by-line comparison: [nsff_pl](https://github.com/kwea123/nsff_pl) and the original [Neural-Scene-Flow-Fields](https://github.com/zhengqili/Neural-Scene-Flow-Fields).
+For a long time the NSFF implementation could not reproduce the paper results: the rendered depth was pure noise, the predicted scene flow was ~zero, and the static/dynamic decomposition failed (the static model was fog, the dynamic model memorized the whole scene). Below is the full list of bugs that were found and fixed, in decreasing order of importance. Reference implementations used for line-by-line comparison: [nsff_pl](https://github.com/kwea123/nsff_pl) and the original [Neural-Scene-Flow-Fields](https://github.com/zhengqili/Neural-Scene-Flow-Fields).
 
 ### 1. The scene scale was never applied (the killer bug)
 `datasets/dynamic.py` computed a scale factor that should make the nearest scene content sit at depth ≈ 1.33, but applied it to a **stale local variable**:
@@ -202,7 +202,7 @@ the investigation of that residual gap, the conclusion, and every change that cl
 
 The natural first suspects were inference-side: maybe the softsplat/MPI interpolation path blurs,
 maybe the NDC↔world round-trip is inexact, maybe the GIF export destroys detail. Controlled
-experiments on the trained v189 checkpoint (same weights, same view, rendered several ways):
+experiments on the trained checkpoint (same weights, same view, rendered several ways):
 
 | Experiment | PSNR vs GT | Conclusion |
 |---|---|---|
@@ -227,7 +227,7 @@ rendering integral:
 
 $$\alpha_{dy} = \big(1-e^{-\sigma_{dy}\delta}\big)\,w,\qquad
 \alpha_{st} = \big(1-e^{-\sigma_{st}\delta}\big)\,(1-w),\qquad
-T_i=\prod_{j<i}(1-\alpha_{dy})(1-\alpha_{st})$$
+T_i=\prod_{j<i}(1-\alpha_{dy,j})(1-\alpha_{st,j})$$
 
 $$C = \sum_i T_i\,\big(\alpha_{dy}\,c_{dy} + \alpha_{st}\,c_{st}\big)$$
 
@@ -331,19 +331,19 @@ In `losses/nsff_loss.py`:
 
 ### Symptom → root cause → fix
 
-| Observed symptom (v189) | Root cause | Fix |
+| Observed symptom | Root cause | Fix |
 |---|---|---|
 | Soft/mushy textures everywhere | gradient starvation + fractional blend gate + short LR schedule | additive composition; entropy + thickness losses; 340k cosine schedule |
 | Ghost fragments of the kid at novel views | dynamic field unconstrained outside training frusta; swept volume marked dynamic for all t | test-time visibility culling; additive composition |
 | Speckled/noisy depth | ReLU density boundaries + `noise_std=1, perturb=1` left on at eval | Softplus sigma; noise/perturb forced to 0 at test |
-| Garbage in static-only renders (pre-v189 #8) | time-independent $w$ starves static field in swept volume | additive composition (masked static loss no longer needed) |
+| Garbage in static-only renders (bug #8 above) | time-independent $w$ starves static field in swept volume | additive composition (masked static loss no longer needed) |
 | Semi-transparent far-plane fog | shared huge last delta | asymmetric last deltas (static 100 / dynamic 1e-3) |
 | Weak scene flow in hard regions | learned occlusion probabilities muting the warp loss | occlusion derived from warped-weight difference (ungameable) |
 | GIF posterization | imageio single-pass palette | ffmpeg palettegen/paletteuse two-pass (+ mp4 export) |
 
 ### Outcome
 
-`logs/nsff/version_191`: best val PSNR **33.5 → 34.96** (now measured noise-free, i.e. a stricter
+The final model: best val PSNR **33.5 → 34.96** (now measured noise-free, i.e. a stricter
 metric), monotone convergence over 340k steps (~5.6 h on one RTX 4090 at 17.9 it/s), no ghosting
 on the wander path, near noise-free depth, and bullet-time/fixed-view/spiral demos on par with the
 nsff_pl reference. The decomposition needs no auxiliary props: the static-only render is clean in
