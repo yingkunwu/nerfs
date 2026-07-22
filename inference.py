@@ -14,6 +14,27 @@ if __name__ == "__main__":
         required=True,
         help="Path to the trained weight",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="spiral",
+        choices=["spiral", "fixtime", "fixview", "all"],
+        help="NSFF only: 'spiral' = moving camera + time (default demo); "
+             "'fixtime' = bullet time (freeze time, orbit camera); "
+             "'fixview' = fixed camera, advancing time; 'all' = run all three",
+    )
+    parser.add_argument(
+        "--t_fixed",
+        type=int,
+        default=None,
+        help="fixtime mode: which time index to freeze (default: middle)",
+    )
+    parser.add_argument(
+        "--view_idx",
+        type=int,
+        default=None,
+        help="fixview mode: which camera pose to hold (default: middle)",
+    )
     args = parser.parse_args()
 
     config_path = os.path.join(args.log_path, 'config.yaml')
@@ -35,4 +56,13 @@ if __name__ == "__main__":
     trainer = TrainerFactory.get_trainer(cfg.trainer)(
         cfg, log_dir=args.log_path, create_log_folder=False)
     trainer.load_model(weight_path)
-    trainer.inference(val_dataset)
+
+    if cfg.trainer == "nsff" and args.mode != "spiral":
+        if args.mode in ("fixtime", "all"):
+            trainer.inference_fixed_time(val_dataset, t_fixed=args.t_fixed)
+        if args.mode in ("fixview", "all"):
+            trainer.inference_fixed_view(val_dataset, view_idx=args.view_idx)
+        if args.mode == "all":
+            trainer.inference(val_dataset)
+    else:
+        trainer.inference(val_dataset)

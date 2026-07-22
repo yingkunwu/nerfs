@@ -324,3 +324,60 @@ class NSFFTrainer(BaseTrainer):
             val_dataset, cam_poses, times,
             os.path.join(self.log_dir, "inference"),
             "Rendering spiral poses (view + time)")
+
+    def inference_fixed_time(self, val_dataset, t_fixed=None, n_poses=120,
+                             n_rounds=1, radius_scale=3.0):
+        """
+        Bullet time: freeze the scene at one instant (the kid stops moving)
+        and gently orbit the camera around that viewpoint. The motion matches
+        the spiral demo's calm per-frame speed -- it just holds time fixed.
+
+        The camera translates on a small world-space circle (radius = a few
+        times the demo's per-frame step) while keeping the fixed view's
+        orientation, exactly like the spiral component of the demo path but
+        without the trajectory drift, so the kid stays centered.
+        """
+        N = len(val_dataset)
+        if t_fixed is None:
+            t_fixed = N // 2
+        t_fixed = int(np.clip(t_fixed, 0, N - 1))
+
+        base = np.percentile(np.abs(np.diff(val_dataset.poses[:, 0, 3])), 10)
+        radius = radius_scale * base
+
+        fixed_pose = val_dataset.poses[t_fixed]
+        rot, center = fixed_pose[:, :3], fixed_pose[:, 3]
+        cam_poses = []
+        for th in np.linspace(0, 2 * np.pi * n_rounds, n_poses, endpoint=False):
+            pose = np.empty((3, 4), dtype=fixed_pose.dtype)
+            pose[:, :3] = rot
+            pose[:, 3] = center + radius * np.array(
+                [np.cos(th), -np.sin(th), 0.0])
+            cam_poses.append(pose)
+        cam_poses = np.stack(cam_poses, 0)
+
+        times = [t_fixed] * n_poses
+        self._run_inference(
+            val_dataset, cam_poses, times,
+            os.path.join(self.log_dir, f"inference_fixtime_{t_fixed:03d}"),
+            f"Rendering bullet time @ t={t_fixed} (gentle orbit)")
+
+    def inference_fixed_view(self, val_dataset, view_idx=None, n_frames=None):
+        """
+        Fixed camera, advancing time: hold one viewpoint and let the kid
+        move (with fractional-time interpolation for smooth slow motion).
+        """
+        N = len(val_dataset)
+        if view_idx is None:
+            view_idx = N // 2
+        view_idx = int(np.clip(view_idx, 0, N - 1))
+        if n_frames is None:
+            n_frames = 4 * N
+
+        cam_poses = np.tile(val_dataset.poses[view_idx], (n_frames, 1, 1))
+        times = np.linspace(0, N - 1, n_frames).tolist()[:-1]
+        cam_poses = cam_poses[:len(times)]
+        self._run_inference(
+            val_dataset, cam_poses, times,
+            os.path.join(self.log_dir, f"inference_fixview_{view_idx:03d}"),
+            f"Rendering fixed view {view_idx} (moving time)")
