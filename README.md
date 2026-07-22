@@ -225,11 +225,11 @@ This is the single most important difference, and it lives at the **rendering eq
 $w(\mathbf{x}) \in [0,1]$, and the two fields are mixed through one gate inside the volume
 rendering integral:
 
-$$\alpha_{dy} = \big(1-e^{-\sigma_{dy}\delta}\big)\,w,\qquad
-\alpha_{st} = \big(1-e^{-\sigma_{st}\delta}\big)\,(1-w),\qquad
-T_i=\prod_{j<i}(1-\alpha_{dy,j})(1-\alpha_{st,j})$$
+$$\alpha_{dy} = (1-e^{-\sigma_{dy}\delta})w, \qquad \alpha_{st} = (1-e^{-\sigma_{st}\delta})(1-w)$$
 
-$$C = \sum_i T_i\,\big(\alpha_{dy}\,c_{dy} + \alpha_{st}\,c_{st}\big)$$
+$$T_i = \prod_{j<i}(1-\alpha_{dy,j})(1-\alpha_{st,j})$$
+
+$$C = \sum_i T_i(\alpha_{dy} c_{dy} + \alpha_{st} c_{st})$$
 
 The failure mode is structural. Because $w$ has **no time input**, every 3D region the kid *ever*
 occupies during the 30 frames must be classified "dynamic" *for all frames* — including the 28
@@ -247,12 +247,11 @@ frames in which that region is actually empty road. Two consequences:
 **nsff_pl (what we ported).** Delete the gate entirely and composite the two fields as independent
 alpha events, NeRF-W style:
 
-$$\alpha_s = 1-e^{-\sigma_s\delta_s},\qquad
-\alpha_d = 1-e^{-\sigma_d\delta_d},\qquad
-\alpha = 1-(1-\alpha_s)(1-\alpha_d),\qquad
-T_i=\prod_{j<i}(1-\alpha_j)$$
+$$\alpha_s = 1-e^{-\sigma_s\delta_s}, \qquad \alpha_d = 1-e^{-\sigma_d\delta_d}$$
 
-$$C=\sum_i T_i\,\big(\alpha_s\,c_s+\alpha_d\,c_d\big)$$
+$$\alpha = 1-(1-\alpha_s)(1-\alpha_d), \qquad T_i = \prod_{j<i}(1-\alpha_j)$$
+
+$$C = \sum_i T_i(\alpha_s c_s + \alpha_d c_d)$$
 
 Now **both fields receive gradient at every sample, in every frame** — the static field keeps
 learning the road even while the kid stands on it, because nothing multiplies it to zero. The
