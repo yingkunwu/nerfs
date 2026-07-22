@@ -144,21 +144,23 @@ class DynamicDataLoader(DataLoader):
             pts_uv_v[:, 1] = np.clip(pts_uv_v[:, 1], 0, self.img_wh[1] - 1)
             pts_d_v = pts_uvd_v[2]
 
-            # d1 = a * d0 + b -> solve a and b
-            # use this regression to estimate the scale and shift of monodepth
-            # predictions
+            # the files in disps/ hold DISPARITY (inverse depth) up to an
+            # unknown scale and shift: disp = a * (1/depth) + b.
+            # Regress against the COLMAP inverse depths to recover a and b,
+            # then convert the 95th disparity percentile (= nearest content)
+            # back to a metric depth.
             try:
                 y_vals = disp[pts_uv_v[:, 1], pts_uv_v[:, 0]]
-                x_vals = pts_d_v
+                x_vals = 1.0 / pts_d_v
                 reg = linregress(x_vals, y_vals)
             except Exception:
                 reg = None
 
             if reg is not None and reg.rvalue ** 2 > 0.9:
-                # d0 = (d1 - b) / d1
+                # depth = a / (disp - b)
                 d = np.percentile(disp, 95)
-                scale_est = (d - reg.intercept) / reg.slope
-                min_depth = min(min_depth, scale_est)
+                depth_est = reg.slope / (d - reg.intercept)
+                min_depth = min(min_depth, depth_est)
             else:
                 min_depth = min(min_depth, np.percentile(pts_d_v, 5))
 
@@ -171,7 +173,7 @@ class DynamicDataLoader(DataLoader):
 
         # correct scale so that the nearest depth is at a little more than 1.0
         self.scale_factor = min_depth * 0.75
-        poses[..., 3] /= self.scale_factor
+        self.poses[..., 3] /= self.scale_factor
 
         # create projection matrix, used to compute optical flow
         bottom = np.zeros((self.N_frames, 1, 4))
@@ -189,11 +191,95 @@ class DynamicDataLoader(DataLoader):
 
         self.directions, self.uv = get_ray_directions(
             self.img_wh[1], self.img_wh[0], self.K, return_uv=True)
+        self.uv = self.uv.reshape(-1, 2)
+
+        # Prebuild per-frame ray buffers once (loading images/flows/disps from
+        # disk at every training step is prohibitively slow).
+        self.rays_dict = {}
+        self.dynamic_idxs = {}
+        for t in range(self.N_frames):
+            self.rays_dict[t] = self._build_frame_buffer(t)
+
+    def _build_frame_buffer(self, t):
+        """Build all per-ray tensors for frame t."""
+        w, h = self.img_wh
+
+        c2w = torch.from_numpy(self.poses[t]).to(torch.float32)
+        rays_o, rays_d = get_rays(self.directions, c2w)
+        # if the camera lies in front of the global near plane (z < -1),
+        # shift ray origins to the camera plane instead so they do not start
+        # behind the camera
+        shift_near = -min(-1.0, float(self.poses[t, 2, 3]))
+        rays_o, rays_d = get_ndc_rays(
+            self.K, 1.0, rays_o, rays_d, shift_near=shift_near)
+
+        # since we are using ndc rays, the near and far interval is limited to
+        # [0, 1] by default
+        near_ = torch.zeros_like(rays_o[:, :1])
+        far_ = torch.ones_like(rays_o[:, :1])
+        rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
+
+        img = Image.open(self.image_paths[t]).convert('RGB')
+        if self.resolution < 1:
+            img = img.resize(self.img_wh, Image.LANCZOS)
+        rgbs = torch.from_numpy(np.array(img)).float() / 255.0
+        rgbs = rgbs.view(h * w, 3)
+
+        disp = cv2.imread(
+            self.disp_paths[t], cv2.IMREAD_ANYDEPTH).astype(np.float32)
+        disp = cv2.resize(disp, self.img_wh, interpolation=cv2.INTER_NEAREST)
+        depth = torch.from_numpy(disp.flatten())
+
+        # motion mask; in this dataset 0 = dynamic region, 255 = static
+        mask = Image.open(self.mask_paths[t]).convert('L')
+        mask = mask.resize(self.img_wh, Image.NEAREST)
+        dynamicness = 1.0 - torch.from_numpy(
+            np.array(mask)).float().flatten() / 255.0
+        self.dynamic_idxs[t] = torch.nonzero(
+            dynamicness > 0.5, as_tuple=False).squeeze(-1)
+        mask = dynamicness
+
+        if t < self.N_frames - 1:
+            flow_fw = read_flow(self.flow_fw_paths[t])
+            flow_fw = resize_flow(flow_fw, w, h)
+            flow_fw = torch.from_numpy(flow_fw).view(h * w, 2)
+        else:
+            flow_fw = torch.zeros(h * w, 2)
+        uv_fw = self.uv + flow_fw
+
+        if t >= 1:
+            flow_bw = read_flow(self.flow_bw_paths[t])
+            flow_bw = resize_flow(flow_bw, w, h)
+            flow_bw = torch.from_numpy(flow_bw).view(h * w, 2)
+        else:
+            flow_bw = torch.zeros(h * w, 2)
+        uv_bw = self.uv + flow_bw
+
+        return {
+            'rays': rays,
+            'rgbs': rgbs,
+            'depth': depth,
+            'mask': mask,  # 1 = dynamic region, 0 = static
+            'uv_fw': uv_fw,
+            'uv_bw': uv_bw,
+        }
 
     def __len__(self):
         return len(self.frames)
 
-    def sample(self, shuffle=False, idx=None):
+    def sample(self, shuffle=False, idx=None, batch_size=None, num_extra=0):
+        """
+        Sample rays from one frame.
+
+        Inputs:
+            shuffle: pick a random frame, otherwise iterate sequentially
+            idx: force a specific frame
+            batch_size: if None, return all rays of the frame (full image);
+                otherwise return @batch_size uniformly sampled rays
+            num_extra: number of extra rays sampled from the dynamic region
+                (motion mask), appended AFTER the uniform rays. Used for hard
+                mining in early training. Only valid with batch_size.
+        """
         if shuffle:
             i = random.choice(self.frames)
         else:
@@ -205,59 +291,35 @@ class DynamicDataLoader(DataLoader):
         if idx is not None:
             i = idx
 
+        buf = self.rays_dict[i]
+        N_rays = buf['rays'].shape[0]
+
+        if batch_size is None:
+            sel = torch.arange(N_rays)
+        else:
+            sel = torch.randint(0, N_rays, (batch_size,))
+            if num_extra > 0 and len(self.dynamic_idxs[i]) > 0:
+                dyn = self.dynamic_idxs[i]
+                extra = dyn[torch.randint(0, len(dyn), (num_extra,))]
+                sel = torch.cat([sel, extra])
+
         c2w = torch.from_numpy(self.poses[i]).to(torch.float32)
-        rays_o, rays_d = get_rays(self.directions, c2w)
-        rays_o, rays_d = get_ndc_rays(self.K, 1.0, rays_o, rays_d)
+        rays_t = i * torch.ones(len(sel), dtype=torch.long)
 
-        rays_t = i * torch.ones(len(rays_o), dtype=torch.long)  # (h*w)
-
-        # since we are using ndc rays, the near and far interval is limited to
-        # [0, 1] by default
-        near, far = 0, 1
-        near_ = near * torch.ones_like(rays_o[:, :1])
-        far_ = far * torch.ones_like(rays_o[:, :1])
-        rays = torch.cat([rays_o, rays_d, near_, far_], dim=1)
-
-        sample = {'img_i': i, 'rays': rays, 'rays_t': rays_t, 'c2w': c2w}
-
-        img = Image.open(self.image_paths[i]).convert('RGB')
-        if self.resolution < 1:
-            img = img.resize(self.img_wh, Image.LANCZOS)
-
-        img_t = torch.from_numpy(np.array(img)).float() / 255.0
-        img_t = img_t.view(self.img_wh[1] * self.img_wh[0], 3)
-        sample['rgbs'] = img_t
-
-        disp = cv2.imread(
-            self.disp_paths[i], cv2.IMREAD_ANYDEPTH).astype(np.float32)
-        disp = cv2.resize(disp, self.img_wh, interpolation=cv2.INTER_NEAREST)
-        sample['depth'] = torch.from_numpy(disp.flatten())
-
-        if i < self.N_frames - 1:
-            flow_fw = read_flow(self.flow_fw_paths[i])
-            flow_fw = resize_flow(
-                flow_fw, self.img_wh[0], self.img_wh[1])
-            flow_fw = torch.from_numpy(flow_fw)
-        else:
-            flow_fw = torch.zeros(self.img_wh[1], self.img_wh[0], 2)
-        sample['uv_fw'] = self.uv + flow_fw
-        sample['uv_fw'] \
-            = sample['uv_fw'].view(self.img_wh[1] * self.img_wh[0], 2)
-
-        if i >= 1:
-            flow_bw = read_flow(self.flow_bw_paths[i])
-            flow_bw = resize_flow(
-                flow_bw, self.img_wh[0], self.img_wh[1])
-            flow_bw = torch.from_numpy(flow_bw)
-        else:
-            flow_bw = torch.zeros(self.img_wh[1], self.img_wh[0], 2)
-        sample['uv_bw'] = self.uv + flow_bw
-        sample['uv_bw'] \
-            = sample['uv_bw'].view(self.img_wh[1] * self.img_wh[0], 2)
-
-        sample['Ks'] = self.Ks.clone()
-        sample['Ps'] = self.Ps.clone()
-        sample['image_size'] = (self.img_wh[1], self.img_wh[0])
-        sample['uv'] = self.uv.view(self.img_wh[1] * self.img_wh[0], 2)
+        sample = {
+            'img_i': i,
+            'c2w': c2w,
+            'rays': buf['rays'][sel],
+            'rays_t': rays_t,
+            'rgbs': buf['rgbs'][sel],
+            'depth': buf['depth'][sel],
+            'mask': buf['mask'][sel],
+            'uv_fw': buf['uv_fw'][sel],
+            'uv_bw': buf['uv_bw'][sel],
+            'uv': self.uv[sel],
+            'Ks': self.Ks.clone(),
+            'Ps': self.Ps.clone(),
+            'image_size': (self.img_wh[1], self.img_wh[0]),
+        }
 
         return sample

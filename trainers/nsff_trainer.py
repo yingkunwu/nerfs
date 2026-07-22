@@ -5,7 +5,6 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 import numpy as np
 import imageio
-from concurrent.futures import ThreadPoolExecutor
 
 from .factory import BaseTrainer
 from models.nsff import NeRF_Static, NeRF_Dynamic, Embedding
@@ -20,7 +19,8 @@ from utils.flowlib import flow_to_image
 class NSFFTrainer(BaseTrainer):
     def __init__(self, cfg, **kwargs):
         super().__init__(cfg, **kwargs)
-        self.criterion = NSFFLoss()
+        self.criterion = NSFFLoss(
+            decay_iteration=cfg.get('decay_iteration', 30))
 
     def create_nerf(self, cfg):
         """Create NeRF model and embeddings."""
@@ -90,48 +90,18 @@ class NSFFTrainer(BaseTrainer):
 
         return results, log
 
-    def extract_from_sample(self, sample, batch_size=None):
-        rays = sample['rays'].to(self.device)  # [N_rays, 6]
-        rays_t = sample['rays_t'].to(self.device)  # [N_rays,]
-        rgbs = sample['rgbs'].to(self.device)  # [N_rgbs, 3]
-        depth = sample['depth'].to(self.device)  # [N_rays,]
-        uv_fw = sample['uv_fw'].to(self.device)  # [N_rays, 2]
-        uv_bw = sample['uv_bw'].to(self.device)  # [N_rays, 2]
-        uv = sample['uv'].to(self.device)  # [N_rays, 2]
-
-        # all the data share the same camera intrinsics and extrinsics
-        if isinstance(sample['Ks'], list):
-            Ks = sample['Ks'][0]
-            Ps = sample['Ps'][0]
-        else:
-            Ks = sample['Ks']
-            Ps = sample['Ps']
-        Ks = Ks.to(self.device)
-        Ps = Ps.to(self.device)
-
-        if batch_size is not None:
-            num_rgb_rays = rays.shape[0]
-            idx = torch.randint(0, num_rgb_rays,
-                                (batch_size,),
-                                device=self.device)
-            rays = rays[idx]
-            rays_t = rays_t[idx]
-            rgbs = rgbs[idx]
-            depth = depth[idx]
-            uv_fw = uv_fw[idx]
-            uv_bw = uv_bw[idx]
-            uv = uv[idx]
-
+    def extract_from_sample(self, sample):
         inputs = {
-            "rays": rays,
-            "rays_t": rays_t,
-            "rgbs": rgbs,
-            "depth": depth,
-            "uv_fw": uv_fw,
-            "uv_bw": uv_bw,
-            "uv": uv,
-            'Ks': Ks,
-            'Ps': Ps
+            "rays": sample['rays'].to(self.device),  # [N_rays, 8]
+            "rays_t": sample['rays_t'].to(self.device),  # [N_rays,]
+            "rgbs": sample['rgbs'].to(self.device),  # [N_rays, 3]
+            "depth": sample['depth'].to(self.device),  # [N_rays,]
+            "mask": sample['mask'].to(self.device),  # [N_rays,] 1 = dynamic
+            "uv_fw": sample['uv_fw'].to(self.device),  # [N_rays, 2]
+            "uv_bw": sample['uv_bw'].to(self.device),  # [N_rays, 2]
+            "uv": sample['uv'].to(self.device),  # [N_rays, 2]
+            "Ks": sample['Ks'].to(self.device),  # [3, 3]
+            "Ps": sample['Ps'].to(self.device),  # [N_frames, 3, 4]
         }
 
         return inputs
@@ -139,36 +109,26 @@ class NSFFTrainer(BaseTrainer):
     def fit(self, train_dataset, val_dataset):
         print("Starting training loop")
         best_psnr = 0.0
+        num_extra = self.cfg.get('num_extra_samples', 512)
+        decay_steps = self.criterion.decay_iteration * 1000
         pbar = tqdm(range(self.cfg.iters), total=self.cfg.iters)
         for step in pbar:
             for m in self.models.values():
                 m.train()
-            # Sample batch
 
-            def get_sample():
-                return train_dataset.sample(shuffle=True)
-
-            # you can increase the number of workers if memory allows
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                samples = list(executor.map(lambda _: get_sample(), range(8)))
-
-            # a list of 16 sampled batches
-            sample = {}
-            for key in samples[0].keys():
-                if key in ['Ks', 'Ps']:
-                    sample[key] = [s[key] for s in samples]
-                elif isinstance(samples[0][key], torch.Tensor):
-                    sample[key] = torch.cat([s[key] for s in samples], dim=0)
-                elif isinstance(samples[0][key], list):
-                    sample[key] = []
-                    for s in samples:
-                        sample[key].extend(s[key])
-                else:
-                    sample[key] = [s[key] for s in samples]
+            # Sample rays from one random frame. During the early stage,
+            # additionally hard-mine rays from the dynamic region (motion
+            # mask) like the original NSFF.
+            n_extra = num_extra if step < decay_steps else 0
+            sample = train_dataset.sample(
+                shuffle=True, batch_size=self.cfg.batch_size,
+                num_extra=n_extra)
 
             max_t = len(train_dataset)
-            inputs = self.extract_from_sample(sample, self.cfg.batch_size)
+            inputs = self.extract_from_sample(sample)
             inputs["max_t"] = max_t
+            # extra hard-mined rays are excluded from the union render loss
+            inputs["n_uniform"] = self.cfg.batch_size
 
             # advance the batch pointer
             self.optimizer.zero_grad()
@@ -176,7 +136,8 @@ class NSFFTrainer(BaseTrainer):
             results, log = self.forward(inputs, step)
 
             log['train/psnr'] = psnr(
-                results['rgb_map_ref'], inputs['rgbs'])
+                results['rgb_map_ref'][:self.cfg.batch_size],
+                inputs['rgbs'][:self.cfg.batch_size])
             log['train/loss'] = sum(
                 [v for k, v in log.items() if 'loss' in k])
 

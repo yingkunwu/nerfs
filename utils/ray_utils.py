@@ -140,7 +140,7 @@ def get_rays(directions, c2w):
     return rays_o, rays_d
 
 
-def get_ndc_rays(K, near, rays_o, rays_d):
+def get_ndc_rays(K, near, rays_o, rays_d, shift_near=None):
     """
     Transform rays from world coordinate to NDC.
     NDC: Space such that the canvas is a cube with sides [-1, 1] in each axis.
@@ -157,6 +157,10 @@ def get_ndc_rays(K, near, rays_o, rays_d):
         near: (N_rays) or float, the depths of the near plane
         rays_o: (N_rays, 3), the origin of the rays in world coordinate
         rays_d: (N_rays, 3), the direction of the rays in world coordinate
+        shift_near: (N_rays) or float, the plane the ray origins are shifted
+            to. Defaults to @near. For cameras that lie in front of the
+            global near plane (world z < -near), pass -camera_z so ray
+            origins do not start behind the camera.
 
     Outputs:
         rays_o: (N_rays, 3), the origin of the rays in NDC
@@ -164,8 +168,11 @@ def get_ndc_rays(K, near, rays_o, rays_d):
     """
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
 
+    if shift_near is None:
+        shift_near = near
+
     # Shift ray origins to near plane
-    t = -(near + rays_o[..., 2]) / rays_d[..., 2]
+    t = -(shift_near + rays_o[..., 2]) / rays_d[..., 2]
     rays_o = rays_o + t[..., None] * rays_d
 
     # Store some intermediate homogeneous results

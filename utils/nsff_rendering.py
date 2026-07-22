@@ -3,7 +3,6 @@ import torch.nn.functional as F
 from einops import repeat, rearrange
 
 from utils.ray_utils import perturb_samples, create_meshgrid, ndc2world
-from utils.softsplat import FunctionSoftsplat
 
 
 def compute_deltas(z_vals, rays_d):
@@ -235,10 +234,13 @@ def inference_blending(
                 results_dy['weights'][..., None] * sf_ref2post, dim=-1),
             'raw_prob_ref2prev': raw_prob_ref2prev,
             'raw_prob_ref2post': raw_prob_ref2post,
+            # 2D visibility maps: integrate the per-sample visibility with the
+            # weights of the WARPED renderings (cf. compute_2d_prob in the
+            # original NSFF)
             'prob_ref2prev': torch.sum(
-                weights_mix.detach() * raw_prob_ref2prev, dim=-1),
+                results_bw['weights'].detach() * raw_prob_ref2prev, dim=-1),
             'prob_ref2post': torch.sum(
-                weights_mix.detach() * raw_prob_ref2post, dim=-1),
+                results_fw['weights'].detach() * raw_prob_ref2post, dim=-1),
             'rgb_bw': results_bw['rgb_map'],
             'rgb_fw': results_fw['rgb_map'],
             'xyz_bw': torch.sum(
@@ -258,7 +260,9 @@ def inference_blending(
         'depth_map_dy': results_dy['depth_map'],
         'blend_w': blend_w,
         'raw_rgb_dy': rgb_dy,
-        'alphas_dy': alpha_dy,
+        # unblended dynamic alphas; interpolate() multiplies by blend_w
+        # itself, so exporting the blended alpha_dy would apply blend twice
+        'alphas_dy': results_dy['alphas'],
         # used as dynamic mask in loss computation
         'weights_map_dy': torch.sum(weights_dy, -1).detach(),
         **res_warp
@@ -363,6 +367,10 @@ def interpolate(results_t, results_tp1, dt, K, c2w, img_wh):
         (img_wh[1], img_wh[0], 3) rgb interpolation result
         (img_wh[1], img_wh[0]) depth of the interpolation (in NDC)
     """
+    # softsplat needs cupy, which is only required for test-time
+    # interpolation; import lazily so training works without it
+    from utils.softsplat import FunctionSoftsplat
+
     device = results_t['raw_pts_ref'].device
     N_rays, N_samples = results_t['raw_pts_ref'].shape[:2]
 
@@ -451,8 +459,6 @@ def interpolate(results_t, results_tp1, dt, K, c2w, img_wh):
             + static_a[:, :, s] * static_rgb[:, :, s]
         ) * dt
 
-        depth += T_i[..., 0] * zs[:, :, s]
-
         alpha1 = (
             1.0 - (1. - transient_rgba_fw[..., 3:]) * (1. - static_a[:, :, s])
         ) * (1. - dt)
@@ -460,6 +466,8 @@ def interpolate(results_t, results_tp1, dt, K, c2w, img_wh):
             1.0 - (1. - transient_rgba_bw[..., 3:]) * (1. - static_a[:, :, s])
         ) * dt
         alpha = alpha1 + alpha2
+
+        depth += T_i[..., 0] * alpha[..., 0] * zs[:, :, s]
 
         T_i = T_i * (1.0 - alpha + 1e-10)
 

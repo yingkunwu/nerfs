@@ -6,14 +6,30 @@ from utils.ray_utils import ndc2world
 
 
 class NSFFLoss(nn.Module):
-    def __init__(self, decay_iteration=50):
+    def __init__(self, decay_iteration=30):
         super().__init__()
         self.decay_iteration = decay_iteration
         self.decay_rate = 10
 
     def forward(self, inputs, targets, global_step):
+        # number of uniformly sampled rays; rays beyond this index are extra
+        # hard-mined samples from the dynamic region and must be excluded
+        # from the union (full render) loss to avoid biasing the static model
+        n_uniform = targets.get('n_uniform', None)
+
         # photo consistency loss
-        render_loss = compute_mse(inputs['rgb_map_ref'], targets["rgbs"])
+        render_loss = compute_mse(
+            inputs['rgb_map_ref'][:n_uniform], targets["rgbs"][:n_uniform])
+
+        # static render loss: supervise the static model directly on pixels
+        # the motion mask marks as static. This bypasses blend_w, which has
+        # no time input and therefore flags every 3D region the dynamic
+        # object EVER traverses as "dynamic" for all frames — without this
+        # loss the static field gets no gradient there and drifts to garbage
+        # (cf. DynamicNeRF, Gao et al. 2021).
+        static_mask = (1.0 - targets['mask']).unsqueeze(-1)
+        render_loss += compute_mse(
+            inputs['rgb_map_static'], targets["rgbs"], static_mask)
         if global_step <= self.decay_iteration * 1000:
             render_loss += compute_mse(
                 inputs['rgb_map_ref_dynamic'], targets["rgbs"])
@@ -34,23 +50,32 @@ class NSFFLoss(nn.Module):
                 inputs['rgb_fw'], targets["rgbs"],
                 inputs["prob_ref2post"].unsqueeze(-1) * weights_map_dy)
 
-        # cycle consistency loss
-        sf_cycle_loss = 0.1 * compute_mae(
+        # cycle consistency loss (w_cycle = 1.0 in the original NSFF)
+        sf_cycle_loss = 1.0 * compute_mae(
             inputs['raw_sf_ref2prev'],
             -inputs['raw_sf_prev2ref'],
             inputs['raw_prob_ref2prev'].unsqueeze(-1)
         )
-        sf_cycle_loss += 0.1 * compute_mae(
+        sf_cycle_loss += 1.0 * compute_mae(
             inputs['raw_sf_ref2post'],
             -inputs['raw_sf_post2ref'],
             inputs['raw_prob_ref2post'].unsqueeze(-1)
         )
 
-        # Encourage weight_post and weight_prev to be close to 1
-        # try to aboid the trivial solution
-        weight_post_loss = torch.mean((1 - inputs['raw_prob_ref2prev']) ** 2)
-        weight_prev_loss = torch.mean((1 - inputs['raw_prob_ref2post']) ** 2)
-        weight_close_loss = 0.001 * (weight_post_loss + weight_prev_loss)
+        # Encourage the visibility weights to be close to 1 to avoid the
+        # trivial solution (everything occluded). The original uses an L1
+        # penalty with weight 0.1 (w_prob_reg).
+        weight_post_loss = torch.mean(
+            torch.abs(1 - inputs['raw_prob_ref2prev']))
+        weight_prev_loss = torch.mean(
+            torch.abs(1 - inputs['raw_prob_ref2post']))
+        weight_close_loss = 0.1 * (weight_post_loss + weight_prev_loss)
+
+        # entropy loss on the blending weight to encourage a decisive
+        # static/dynamic decomposition (w_entropy = 1e-3 in the original)
+        blend_w = inputs['blend_w']
+        entropy_loss = 1e-3 * torch.mean(
+            -blend_w * torch.log(blend_w + 1e-8))
 
         # scene flow regularization loss
         N = inputs['raw_pts_ref'].shape[1]
@@ -123,6 +148,7 @@ class NSFFLoss(nn.Module):
             'reg_min_loss': reg_min_loss,
             'reg_sp_sm_loss': reg_sp_sm_loss,
             'weight_close_loss': weight_close_loss,
+            'entropy_loss': entropy_loss,
             'depth_loss': depth_loss / (self.decay_rate ** divsor),
             'flow_loss': flow_loss / (self.decay_rate ** divsor)
         }
